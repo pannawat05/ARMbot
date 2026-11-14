@@ -11,6 +11,7 @@
   import BarcodeScanner from './components/BarcodeScanner.svelte';
 
   let items = $state([]);
+  const unknownItem = $derived(items.find((item) => item.yolo_class === 'unknown'));
   let status = $state(null);
   let offline = $state(false);
   let link = $state(null); // MQTT or HTTP connection to the robot
@@ -146,6 +147,12 @@
         <p class="scan-result">บาร์โค้ดที่อ่านได้: <code>{lastScannedCode}</code></p>
       {/if}
       <ItemCards {items} onpick={pick} />
+      {#if unknownItem}
+        <div class="other-object">
+          <button class="pick-other" onclick={() => pick(unknownItem)} disabled={unknownItem.stock <= 0}>Pick another object</button>
+          <small>*Notice: arm will pick nearest first</small>
+        </div>
+      {/if}
       <QueuePanel {status} oncancel={(id) => link?.cancel(id)} onstop={() => link?.stop()} />
     </section>
   </main>
@@ -173,6 +180,12 @@
         <button type="submit">สั่งหยิบ</button>
       </form>
       <ItemTable {items} onpick={pick} />
+      {#if unknownItem}
+        <div class="other-object">
+          <button class="pick-other" onclick={() => pick(unknownItem)} disabled={unknownItem.stock <= 0}>Pick another object</button>
+          <small>*Notice: arm will pick nearest first</small>
+        </div>
+      {/if}
     </section>
   </main>
 {/if}
@@ -188,6 +201,9 @@
   .mobile .top { position: sticky; top: 0; z-index: 2; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--bg); }
   .mobile .bottom { display: flex; flex-direction: column; gap: 12px; padding: 0 12px 24px; }
   .scan-actions { display: grid; gap: 8px; }
+  .other-object { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .pick-other { padding: 10px 14px; font-weight: 700; }
+  .other-object small { color: var(--muted); }
   .scan { padding: 16px; font-size: 1.1rem; font-weight: 700; background: var(--accent); color: #111; border: 0; }
   .scan-result { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--panel); overflow-wrap: anywhere; }
   .scan-result code { color: var(--accent); }

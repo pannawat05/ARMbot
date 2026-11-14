@@ -4,6 +4,7 @@
   import QuantityInput from './QuantityInput.svelte';
 
   let { items, onpick } = $props();
+  const classifiedItems = $derived(items.filter((item) => item.yolo_class !== 'unknown'));
   let counts = $state({}); // item id -> number to pick (1 when untouched)
   function order(item) {
     const n = Math.min(counts[item.id] ?? 1, Math.max(1, item.stock));
@@ -12,9 +13,9 @@
   }
   let query = $state('');
   let zone = $state('');
-  const zones = $derived([...new Set(items.map((i) => i.zone))].sort());
+  const zones = $derived([...new Set(classifiedItems.map((i) => i.zone))].sort());
   const shown = $derived(
-    items.filter((i) => {
+    classifiedItems.filter((i) => {
       const q = query.trim().toLowerCase();
       const text = [i.name, i.name_th, i.barcode, i.zone, ...i.aliases].join(' ').toLowerCase();
       return (!q || text.includes(q)) && (!zone || i.zone === zone);
