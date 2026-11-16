@@ -60,31 +60,33 @@ python python/robot_pipeline.py --dry-run --show
 
 # Armbot MQTT Topics
 
-## Pi ส่งออก (publish): หน้าเว็บ subscribe topic เหล่านี้
+ใช้ `<p>` แทน topic prefix ที่ตั้งใน `calibration/mqtt.json` (ค่าเริ่มต้น `armbot`) และต้องตั้ง prefix ฝั่งหน้าเว็บให้ตรงกัน Pi จะ publish/subscribe topics เหล่านี้เมื่อเปิด MQTT (ยกเว้นเมื่อใช้ `--no-mqtt`)
 
-| Topic | Payload | QoS | Retained | ส่งเมื่อไร | รายละเอียด |
+## Pi ส่งออก (publish)
+
+| Topic | Payload | QoS | Retained | ส่งเมื่อไร / ผู้ใช้ |
 |---|---|---|---|---|---|
-| `armbot/online` | ข้อความ `"1"` หรือ `"0"` | 1 | ใช่ | `"1"` ตอนต่อ broker ได้, `"0"` ตอนปิดโปรแกรมหรือหลุด (Last Will) | บอกว่า Pi ออนไลน์อยู่ไหม ถ้าเป็น `"0"` หน้าเว็บจะขึ้นแถบสีแดง "เชื่อมต่อหุ่นยนต์ไม่ได้" |
-| `armbot/status` | JSON `{"mode", "state", "jobs":[...], "log":[...]}` | 0 | ใช่ | เช็กทุก 1 วินาที และส่งเฉพาะตอนข้อมูลเปลี่ยน | สถานะแขนกลกับคิวงาน (ดูฟิลด์ในตารางถัดไป) |
-| `armbot/items` | JSON `{"items":[...]}` | 1 | ใช่ | ตอนต่อ broker ได้ และตอนรายการของเปลี่ยน เช่น stock ลดหลังหยิบสำเร็จ | รายการของจาก `calibration/inventory.json` มีฟิลด์ `id`, `name`, `name_th`, `zone`, `stock`, `barcode`, `aliases`, `picks` |
-| `armbot/event` | JSON `{"type":"queued","job":{...},"item":{...}}` หรือ `{"type":"unknown","query":{...}}` | 1 | ไม่ | หลังได้รับ `cmd/queue` ทุกครั้ง | ตอบกลับคำสั่งหยิบ: `queued` แปลว่าเข้าคิวแล้ว, `unknown` แปลว่าหาของไม่เจอ |
-| `armbot/unknown` | JSON `{"type":"unknown_object","message":"Unknown object detected","job_id","box":{"x1","y1","x2","y2"},"box_center_size":{"cx","cy","w","h"},"image_size":[w,h],"file","time"}` | 1 | ไม่ | เมื่อโหมดเดา ("ของอื่น") เห็นของที่ไม่มีคลาสครั้งแรกในงานหยิบนั้น | แจ้งว่าพบของที่ไม่รู้จัก พร้อมกรอบ (พิกเซล และแบบ YOLO เป็นสัดส่วนของภาพ) ภาพต้นฉบับกับไฟล์ label เก็บที่ `captures/unknown/` บน Pi |
-| `armbot/unknown/image` | ภาพ JPEG (binary) ที่วาดกรอบสีแดงแล้ว | 0 | ไม่ | ต่อจาก `armbot/unknown` ทันที | ภาพของชิ้นที่ไม่รู้จัก |
-| `armbot/camera` | ภาพ JPEG (binary) ขนาด 320×240 ประมาณ 10 KB | 0 | ไม่ | ทุก 1 วินาที | ภาพจากกล้องบนแขน สำหรับหน้า dashboard บน cloud |
+| `<p>/online` | ข้อความ `"1"` หรือ `"0"` | 1 | ใช่ | `"1"` เมื่อเชื่อม broker; `"0"` เมื่อปิดโปรแกรมหรือ broker ตรวจพบว่าหลุด (Last Will) | สถานะออนไลน์ หน้าเว็บใช้แสดงสถานะการเชื่อมต่อ |
+| `<p>/status` | JSON `{"mode","state","jobs":[...],"log":[...]}` | 0 | ใช่ | Pi ตรวจทุก 1 วินาทีและส่งเมื่อข้อมูลเปลี่ยน | สถานะแขน คิวงาน และ log; หน้าเว็บ subscribe topic นี้ |
+| `<p>/items` | JSON `{"items":[...]}` | 1 | ใช่ | เมื่อเชื่อม broker และเมื่อรายการเปลี่ยน เช่น stock หรือจำนวนหยิบ | รายการจาก `calibration/inventory.json`; แต่ละ item มี `id`, `name`, `name_th`, `yolo_class`, `color_only`, `zone`, `stock`, `barcode`, `aliases`, `picks`; หน้าเว็บ subscribe topic นี้ |
+| `<p>/event` | JSON `{"type":"queued","job":{...},"item":{...}}` หรือ `{"type":"unknown","query":{...}}` | 1 | ไม่ | ตอบกลับทุกคำสั่ง `<p>/cmd/queue` | ยืนยันว่าเพิ่มงานแล้ว (`queued`) หรือไม่พบ item (`unknown`); สำหรับ client ที่ต้องการผลตอบรับ หน้าเว็บปัจจุบันไม่ได้ subscribe topic นี้ |
+| `<p>/unknown` | JSON มี `type`, `message`, `time`, `job_id`, `image_size`, `box`, `box_center_size`, `file` | 1 | ไม่ | เมื่อโหมดเดาวัตถุ (`yolo_class: "unknown"`) พบวัตถุที่ไม่มีคลาส | แจ้งกรอบวัตถุ; `box` เป็นพิกเซล ส่วน `box_center_size` เป็น center x/y และ width/height ที่หารด้วยขนาดภาพแล้ว ภาพต้นฉบับและ label เก็บใน `captures/unknown/` บน Pi; ใช้กับ client เฝ้าดู เช่น `python/watch_unknown.py` |
+| `<p>/unknown/image` | JPEG binary ที่วาดกรอบสีแดง | 0 | ไม่ | ส่งทันทีหลัง `<p>/unknown` | ภาพวัตถุไม่รู้จัก; ใช้คู่กับ topic ด้านบน |
+| `<p>/camera` | JPEG binary ขนาด 320×240 | 0 | ไม่ | ทุก `camera_every_s` วินาที (ค่าเริ่มต้น 1; ตั้ง 0 เพื่อปิด) เมื่อมีกล้องและเชื่อม broker | ภาพสดจากกล้อง; หน้าเว็บ cloud subscribe topic นี้ |
 
-## Pi รับเข้า (subscribe `armbot/cmd/#`): หน้าเว็บหรือเครื่องอื่นส่งมาสั่งงาน
+## Pi รับเข้า (subscribe `<p>/cmd/#`): หน้าเว็บหรือ client อื่นส่งมาสั่งงาน
 
 | Topic | Payload ตัวอย่าง | ผลที่เกิดขึ้น |
 |---|---|---|
-| `armbot/cmd/queue` | `{"item_id":"relay","source":"voice"}` | เพิ่มงานหยิบเข้าคิว |
+| `<p>/cmd/queue` | `{"item_id":"relay","source":"voice","count":2}` | เพิ่มงานหยิบเข้าคิวด้วย item id; เลือกใช้เพียงหนึ่งใน `item_id`, `barcode` หรือ `text` |
 | | `{"barcode":"ARM-0002","source":"barcode"}` | หาของจากบาร์โค้ด |
-| | `{"text":"เอารีเลย์","source":"mqtt"}` | หาของจากคำใน `aliases` |
-| `armbot/cmd/cancel` | `{"id":3}` | ยกเลิกงานหมายเลข 3 ถ้างานนั้นกำลังหยิบอยู่ แขนจะหยุดแล้วกลับไปท่าพัก |
-| `armbot/cmd/stop` | `{}` | หยุดทันทีและยกเลิกทั้งคิว แขนจะกลับไปท่าพัก (rest pose) |
+| | `{"text":"เอารีเลย์","source":"mqtt","quantity":1}` | หาของจากคำใน `aliases`; `count` หรือ `quantity` ระบุจำนวน (ค่าเริ่มต้น 1; ถูกจำกัดตาม stock และขีดจำกัดต่อ job) |
+| `<p>/cmd/cancel` | `{"id":3}` | ยกเลิกงานหมายเลข 3; ถ้ากำลังหยิบจะหยุดและกลับท่าพัก |
+| `<p>/cmd/stop` | `{}` | หยุดงานที่กำลังทำและยกเลิกทั้งคิว จากนั้นกลับท่าพัก (rest pose) |
 
-> ใน `cmd/queue` ใส่แค่อย่างเดียวจาก `item_id`, `barcode` หรือ `text` ส่วน `source` ไม่ใส่ก็ได้ ค่าเริ่มต้นคือ `"mqtt"`
+> ใน `cmd/queue` ใส่เพียงหนึ่งอย่างจาก `item_id`, `barcode` หรือ `text`; `source` ไม่ใส่ได้ (ค่าเริ่มต้น `"mqtt"`)
 
-## ฟิลด์ใน `armbot/status`
+## ฟิลด์ใน `<p>/status`
 
 | ฟิลด์ | ค่าที่เป็นไปได้ | ความหมาย |
 |---|---|---|
@@ -93,6 +95,7 @@ python python/robot_pipeline.py --dry-run --show
 | `jobs[].id` | ตัวเลข | หมายเลขงาน ใช้กับ `cmd/cancel` |
 | `jobs[].item_id`, `name`, `name_th` | เช่น `relay`, `รีเลย์โมดูล` | ของที่สั่งหยิบ |
 | `jobs[].source` | `voice` / `barcode` / `click` / `mqtt` | ช่องทางที่สั่งเข้ามา |
+| `jobs[].count`, `jobs[].done` | จำนวนที่สั่ง / จำนวนที่หยิบสำเร็จ | ความคืบหน้าของงานหยิบหลายชิ้น |
 | `jobs[].state` | `queued` → `running` → `done` / `failed` / `cancelled` | สถานะของงานแต่ละงาน |
 | `jobs[].message` | ข้อความ | เหตุผลเมื่องานไม่สำเร็จ หรือรายละเอียดผลงาน |
 | `jobs[].created` | Unix time | เวลาที่สั่งงาน |
