@@ -3,6 +3,7 @@
   import QuantityInput from './QuantityInput.svelte';
 
   let { items, onpick } = $props();
+  const classifiedItems = $derived(items.filter((item) => item.yolo_class !== 'unknown'));
   let counts = $state({}); // item id -> number to pick (1 when untouched)
 
   function order(item) {
@@ -13,7 +14,7 @@
 </script>
 
 <div class="cards">
-  {#each items as item (item.id)}
+  {#each classifiedItems as item (item.id)}
     <div class="card" class:empty={item.stock <= 0}>
       <span class="name">{item.name_th}</span>
       <span class="sub">{item.name}</span>

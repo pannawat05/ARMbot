@@ -1,101 +1,153 @@
-# YOLO XYZ + DDQN + Raspberry Pi 5 + PCA9685 (C++/Python)
 
-This ZIP combines the available project files in one repository. It includes a **dry-run integration scaffold**,
-not a claim that autonomous physical pick-and-place is already calibrated.
 
-## Hardware/software architecture
-ESP32-CAM/OV3660 stream -> Raspberry Pi 5 Python YOLO XYZ -> legacy IK/DDQN dry-run -> (future) C++ PCA9685 daemon -> six servos.
+## Installation (Raspberry Pi OS)
 
-The C++ controller uses Linux `i2c-dev`, not pigpio. The PCA9685 generates servo PWM in hardware; the Pi communicates over I2C.
-The `servo_daemon` command protocol is `MOVE <six angles in degrees>`, `OFF`, and `QUIT`, but the physical bridge is intentionally
-not connected by default.
+### 1. System Dependencies & I2C Setup
 
-## Install on Raspberry Pi OS
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake i2c-tools python3-venv
-sudo raspi-config   # enable I2C
+sudo raspi-config  # Navigate to Interface Options -> I2C -> Enable
 sudo reboot
+
 ```
-Check the board address:
+
+After rebooting, verify that the PCA9685 board is detected on the I2C bus (typically at address `0x40`):
+
 ```bash
 sudo i2cdetect -y 1
+
 ```
-Build C++:
+
+### 2. Build the C++ Servo Daemon
+
 ```bash
 cd cpp
 cmake -S . -B build
 cmake --build build -j
-```
-Python:
-```bash
 cd ..
+
+```
+
+### 3. Set Up Python Environment
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r python/requirements.txt
+
 ```
 
-## Required assets before camera dry-run
-1. Copy YOLO weights to `models/best.pt`.
-2. Create real `calibration/H_camera_to_robot.npy` from measured points at 640x480.
-3. Edit `calibration/config.json`: actual stream URL, measured `table_z_mm`, class grasp offsets, tray XYZ.
-4. Check model file and Python dependencies.
+---
 
-Run only dry-run:
+## Pre-Flight Checklist (Calibration & Assets)
+
+Before running the vision pipeline, ensure the following assets and configurations are in place:
+
+1. **Model Weights:** Place your trained YOLO weights at `models/best.pt`.
+2. **Homography Matrix:** Generate a real `calibration/H_camera_to_robot.npy` using measured reference points at `640x480` resolution.
+3. **System Config:** Update `calibration/config.json` with:
+* Your actual ESP32-CAM stream URL
+* Measured `table_z_mm`
+* Class-specific grasp offsets
+* Target tray `XYZ` coordinates
+
+
+4. **Environment Check:** Verify that all Python packages in `requirements.txt` are installed in your active `.venv`.
+
+---
+
+## Usage
+
+**Run a single dry-run inference pass (headless):**
+
 ```bash
 python python/robot_pipeline.py --dry-run --once
+
 ```
-To preview:
+
+**Run continuous dry-run with live visual preview:**
+
 ```bash
 python python/robot_pipeline.py --dry-run --show
+
 ```
 
-## Safety
-- Physical servo motion is not enabled in the Python pipeline.
-- Do not connect or run servo commands with uncalibrated limits.
-- Use an external servo power supply sized for all six servos, common ground, and a safe mechanical test setup.
-- The included DH/drawing estimates are provisional. The current original Kinematics is a 3-DOF positional approximation, not a validated six-axis model.
-- The DDQN checkpoint was trained against the original state/dynamics assumptions. A changed robot geometry may require evaluation/retraining.
-- A single homography only maps the table plane to XY; it does not measure object height/depth.
+*(Append `--no-mqtt` to either command if you want to run locally without connecting to an MQTT broker.)*
 
-# Armbot MQTT Topics
+---
 
-## Pi ส่งออก (publish): หน้าเว็บ subscribe topic เหล่านี้
+## Safety & Hardware Limitations
 
-| Topic | Payload | QoS | Retained | ส่งเมื่อไร | รายละเอียด |
-|---|---|---|---|---|---|
-| `armbot/online` | ข้อความ `"1"` หรือ `"0"` | 1 | ใช่ | `"1"` ตอนต่อ broker ได้, `"0"` ตอนปิดโปรแกรมหรือหลุด (Last Will) | บอกว่า Pi ออนไลน์อยู่ไหม ถ้าเป็น `"0"` หน้าเว็บจะขึ้นแถบสีแดง "เชื่อมต่อหุ่นยนต์ไม่ได้" |
-| `armbot/status` | JSON `{"mode", "state", "jobs":[...], "log":[...]}` | 0 | ใช่ | เช็กทุก 1 วินาที และส่งเฉพาะตอนข้อมูลเปลี่ยน | สถานะแขนกลกับคิวงาน (ดูฟิลด์ในตารางถัดไป) |
-| `armbot/items` | JSON `{"items":[...]}` | 1 | ใช่ | ตอนต่อ broker ได้ และตอนรายการของเปลี่ยน เช่น stock ลดหลังหยิบสำเร็จ | รายการของจาก `calibration/inventory.json` มีฟิลด์ `id`, `name`, `name_th`, `zone`, `stock`, `barcode`, `aliases`, `picks` |
-| `armbot/event` | JSON `{"type":"queued","job":{...},"item":{...}}` หรือ `{"type":"unknown","query":{...}}` | 1 | ไม่ | หลังได้รับ `cmd/queue` ทุกครั้ง | ตอบกลับคำสั่งหยิบ (ถ้า `cmd/queue` ส่ง `job_id` มา จะส่ง `job_id` เดิมกลับใน event ด้วย): `queued` แปลว่าเข้าคิวแล้ว, `unknown` แปลว่าหาของไม่เจอ |
-| `armbot/unknown` | JSON `{"type":"unknown_object","message":"Unknown object detected","job_id","box":{"x1","y1","x2","y2"},"box_center_size":{"cx","cy","w","h"},"image_size":[w,h],"file","time"}` | 1 | ไม่ | เมื่อโหมดเดา ("ของอื่น") เห็นของที่ไม่มีคลาสครั้งแรกในงานหยิบนั้น | แจ้งว่าพบของที่ไม่รู้จัก พร้อมกรอบ (พิกเซล และแบบ YOLO เป็นสัดส่วนของภาพ) ภาพต้นฉบับกับไฟล์ label เก็บที่ `captures/unknown/` บน Pi |
-| `armbot/unknown/image` | ภาพ JPEG (binary) ที่วาดกรอบสีแดงแล้ว | 0 | ไม่ | ต่อจาก `armbot/unknown` ทันที | ภาพของชิ้นที่ไม่รู้จัก |
-| `armbot/inspection/latest` | JSON ผลตรวจล่าสุด (`event_id`, `job_id`, `requested`, `detected`, `completed_at`, `image` เป็น base64) | 1 | ใช่ | เมื่อ Pi รับ `inspection/result` ใหม่ที่ผ่านการตรวจแล้ว | ให้หน้า Dashboard แสดงผลตรวจและรูปทันทีแม้เปิดหน้าทีหลัง |
-| `armbot/inspection/result` (รับเข้า) | JSON `{"type":"inspection_result","status":"completed","job_id","event_id","requested","detected","image":{"encoding":"base64","data"}}` | 1 | ไม่ | Dashboard ฝั่งรับของส่งมาหลังบันทึกผลตรวจและรูป | Pi subscribe ที่ topic นี้ (เปลี่ยนได้ด้วย `result_topic` ใน `calibration/mqtt.json` หรือ `MQTT_RESULT_TOPIC`) ตัดข้อความซ้ำด้วย `event_id` เก็บรูปที่ `captures/inspection/` (ล่าสุด 20) และผูกกับคิวที่ส่ง `job_id` เดียวกันมากับ `cmd/queue` |
-| `armbot/camera` | ภาพ JPEG (binary) ขนาด 320×240 ประมาณ 10 KB | 0 | ไม่ | ทุก 1 วินาที | ภาพจากกล้องบนแขน สำหรับหน้า dashboard บน cloud |
+> [!WARNING]
+> **Do not connect or run servo commands with uncalibrated joint limits.** Physical servo actuation is disabled in the Python pipeline by default to prevent mechanical damage.
 
-## Pi รับเข้า (subscribe `armbot/cmd/#`): หน้าเว็บหรือเครื่องอื่นส่งมาสั่งงาน
+* **Power Supply:** Always use a dedicated external power supply rated for the stall current of all six servos, sharing a common ground (`GND`) with the Raspberry Pi.
+* **Kinematics Approximation:** The included DH parameters and drawings are provisional. The current kinematics solver is a **3-DOF positional approximation**, not a validated 6-axis model.
+* **RL Policy Assumptions:** The included DDQN checkpoint was trained against original state/dynamics assumptions. Any changes to robot link geometry require re-evaluation or retraining.
+* **Planar Mapping:** A single 2D homography matrix only maps the table plane to `(X, Y)` coordinates; it cannot measure object height or depth (`Z`).
 
-| Topic | Payload ตัวอย่าง | ผลที่เกิดขึ้น |
-|---|---|---|
-| `armbot/cmd/queue` | `{"item_id":"relay","source":"voice"}` | เพิ่มงานหยิบเข้าคิว |
-| | `{"barcode":"ARM-0002","source":"barcode"}` | หาของจากบาร์โค้ด |
-| | `{"text":"เอารีเลย์","source":"mqtt"}` | หาของจากคำใน `aliases` |
-| `armbot/cmd/cancel` | `{"id":3}` | ยกเลิกงานหมายเลข 3 ถ้างานนั้นกำลังหยิบอยู่ แขนจะหยุดแล้วกลับไปท่าพัก |
-| `armbot/cmd/stop` | `{}` | หยุดทันทีและยกเลิกทั้งคิว แขนจะกลับไปท่าพัก (rest pose) |
+---
 
-> ใน `cmd/queue` ใส่แค่อย่างเดียวจาก `item_id`, `barcode` หรือ `text` ส่วน `source` ไม่ใส่ก็ได้ ค่าเริ่มต้นคือ `"mqtt"`
+## Armbot MQTT Topics
 
-## ฟิลด์ใน `armbot/status`
+ใช้ `<p>` แทน topic prefix ที่ตั้งใน `calibration/mqtt.json` (ค่าเริ่มต้นคือ `armbot`) โดยต้องตั้งค่า prefix ฝั่งหน้าเว็บให้ตรงกัน Raspberry Pi จะ publish และ subscribe topics เหล่านี้เมื่อเปิดใช้งาน MQTT (ยกเว้นเมื่อรันพร้อม flag `--no-mqtt`)
+
+### 1. Pi ส่งออก (Publish)
+
+| Topic | Payload | QoS | Retained | เงื่อนไขการส่ง | คำอธิบายและผู้ใช้งาน |
+| --- | --- | --- | --- | --- | --- |
+| `<p>/online` | `"1"` หรือ `"0"` | 1 | ใช่ | `"1"` เมื่อเชื่อม broker; `"0"` เมื่อปิดโปรแกรมหรือหลุดการเชื่อมต่อ (Last Will) | สถานะออนไลน์ของ Pi (หน้าเว็บใช้แสดงสถานะการเชื่อมต่อ) |
+| `<p>/status` | JSON `{"mode","state","jobs":[...],"log":[...]}` | 0 | ใช่ | ตรวจสอบทุก 1 วินาที และส่งเมื่อข้อมูลมีการเปลี่ยนแปลง | สถานะแขนกล คิวงาน และ log ล่าสุด (หน้าเว็บ subscribe) |
+| `<p>/items` | JSON `{"items":[...]}` | 1 | ใช่ | เมื่อเชื่อม broker และเมื่อข้อมูลสินค้าเปลี่ยน (เช่น stock หรือจำนวนหยิบ) | รายการสินค้าจาก `calibration/inventory.json` ประกอบด้วย `id`, `name`, `name_th`, `yolo_class`, `color_only`, `zone`, `stock`, `barcode`, `aliases`, `picks` (หน้าเว็บ subscribe) |
+| `<p>/event` | JSON `{"type":"queued","job":{...},"item":{...}}` หรือ `{"type":"unknown","query":{...}}` | 1 | ไม่ | ตอบกลับทันทีทุกครั้งที่ได้รับคำสั่ง `<p>/cmd/queue` | ยืนยันว่าเพิ่มงานสำเร็จ (`queued`) หรือไม่พบสินค้า (`unknown`) สำหรับ client ภายนอก (หน้าเว็บปัจจุบันไม่ได้ใช้) |
+| `<p>/unknown` | JSON (`type`, `message`, `time`, `job_id`, `image_size`, `box`, `box_center_size`, `file`) | 1 | ไม่ | เมื่อโหมดเดาวัตถุ (`yolo_class: "unknown"`) พบวัตถุที่ไม่มีคลาส | แจ้งพิกัดกรอบวัตถุ (`box` = พิกเซล, `box_center_size` = ค่า normalized 0–1) ภาพต้นฉบับและ label บันทึกไว้ที่ `captures/unknown/` บน Pi ใช้ร่วมกับ `python/watch_unknown.py` |
+| `<p>/unknown/image` | JPEG binary (วาดกรอบสีแดง) | 0 | ไม่ | ส่งทันทีหลังจาก `<p>/unknown` | ภาพถ่ายวัตถุที่ไม่รู้จัก ใช้แสดงผลคู่กับ topic ด้านบน |
+| `<p>/inspection/latest` | JSON ผลตรวจล่าสุด (`event_id`, `job_id`, `requested`, `detected`, `completed_at`, `image` เป็น base64) | 1 | ใช่ | เมื่อ Pi รับ `<p>/inspection/result` ใหม่ที่ผ่านการตรวจแล้ว | ให้หน้า Dashboard แสดงผลตรวจและรูปทันที แม้เปิดหน้าทีหลังหรือใช้ผ่านคลาวด์ |
+| `<p>/camera` | JPEG binary (`320×240`) | 0 | ไม่ | ทุก `camera_every_s` วินาที (ค่าเริ่มต้น `1`, ตั้ง `0` เพื่อปิด) เมื่อกล้องพร้อมใช้งาน | ภาพสดจากกล้องสำหรับหน้าเว็บ Cloud |
+
+---
+
+### 2. Pi รับคำสั่ง (Subscribe `<p>/cmd/#`)
+
+หน้าเว็บหรือ client อื่นสามารถส่งคำสั่งควบคุมมายัง topic ต่อไปนี้:
+
+| Topic | ตัวอย่าง Payload | การทำงาน |
+| --- | --- | --- |
+| `<p>/cmd/queue` | `{"item_id":"relay","source":"voice","count":2}` | เพิ่มงานหยิบเข้าคิวด้วย `item_id` |
+|  | `{"barcode":"ARM-0002","source":"barcode"}` | ค้นหาและเพิ่มงานจากรหัส `barcode` |
+|  | `{"text":"เอารีเลย์","source":"mqtt","quantity":1}` | ค้นหาสินค้าจากคำใน `aliases` |
+| `<p>/cmd/cancel` | `{"id":3}` | ยกเลิกงานหมายเลข `3` (หากกำลังหยิบอยู่จะหยุดและกลับท่าพักทันที) |
+| `<p>/cmd/stop` | `{}` | **หยุดฉุกเฉิน:** หยุดงานปัจจุบัน ยกเลิกงานทั้งหมดในคิว และกลับสู่ท่าพัก (`rest pose`) |
+| `<p>/inspection/result` | `{"type":"inspection_result","status":"completed","job_id","event_id","requested","detected","image":{"encoding":"base64","data"}}` (QoS 1) | รับผลตรวจและรูปจาก Dashboard ฝั่งรับของ ตัดข้อความซ้ำด้วย `event_id` เก็บรูปที่ `captures/inspection/` (ล่าสุด 20) และผูกกับคิวที่ส่ง `job_id` เดียวกัน เปลี่ยน topic ได้ด้วย `result_topic` ใน `calibration/mqtt.json` หรือ `MQTT_RESULT_TOPIC` |
+
+> **หมายเหตุสำหรับ `<p>/cmd/queue`:**
+> * เลือกระบุตัวระบุสินค้าเพียง **อย่างใดอย่างหนึ่ง** จาก `item_id`, `barcode` หรือ `text`
+> * `count` หรือ `quantity` ใช้ระบุจำนวนชิ้น (ค่าเริ่มต้นคือ `1` และจะถูกจำกัดไม่ให้เกิน `stock` คงเหลือหรือลิมิตต่อรอบงาน)
+> * `job_id` (สตริง ไม่เกิน 100 ตัวอักษร) เป็นทางเลือก: Pi จะส่งกลับใน `<p>/event` และใช้ผูกกับผลตรวจใน `<p>/inspection/result`
+> * `source` เป็นทางเลือก (หากไม่ระบุ ค่าเริ่มต้นคือ `"mqtt"`)
+> 
+> 
+
+---
+
+### 3. โครงสร้างข้อมูลใน `<p>/status`
 
 | ฟิลด์ | ค่าที่เป็นไปได้ | ความหมาย |
-|---|---|---|
-| `mode` | `execute` / `dry-run` | `execute` ขยับแขนจริง, `dry-run` ไม่ส่งสัญญาณไป servo |
-| `state` | `idle` / `picking` / `resting` | ว่างอยู่ / กำลังหยิบ / กำลังกลับท่าพัก |
-| `jobs[].id` | ตัวเลข | หมายเลขงาน ใช้กับ `cmd/cancel` |
-| `jobs[].item_id`, `name`, `name_th` | เช่น `relay`, `รีเลย์โมดูล` | ของที่สั่งหยิบ |
-| `jobs[].source` | `voice` / `barcode` / `click` / `mqtt` | ช่องทางที่สั่งเข้ามา |
-| `jobs[].state` | `queued` → `running` → `done` / `failed` / `cancelled` | สถานะของงานแต่ละงาน |
-| `jobs[].message` | ข้อความ | เหตุผลเมื่องานไม่สำเร็จ หรือรายละเอียดผลงาน |
-| `jobs[].created` | Unix time | เวลาที่สั่งงาน |
-| `log` | รายการข้อความ | log ล่าสุดของโปรแกรมหยิบ |
+| --- | --- | --- |
+| `mode` | `execute` / `dry-run` | `execute` = สั่งขยับแขนกลจริง, `dry-run` = จำลองการทำงานโดยไม่ส่งสัญญาณไปยัง servo |
+| `state` | `idle` / `picking` / `resting` | สถานะปัจจุบัน: ว่าง / กำลังหยิบวัตถุ / กำลังกลับท่าพัก |
+| `jobs[].id` | ตัวเลข (Integer) | หมายเลขงาน (ใช้อ้างอิงสำหรับคำสั่ง `cmd/cancel`) |
+| `jobs[].item_id`, `name`, `name_th` | เช่น `relay`, `รีเลย์โมดูล` | รหัสและชื่อของสินค้าที่ถูกสั่งหยิบ |
+| `jobs[].source` | `voice` / `barcode` / `click` / `mqtt` | ช่องทางที่มาของคำสั่ง |
+| `jobs[].count`, `jobs[].done` | ตัวเลข (Integer) | จำนวนที่สั่งทั้งหมด (`count`) และจำนวนที่หยิบสำเร็จแล้ว (`done`) |
+| `jobs[].state` | `queued` → `running` → `done` / `failed` / `cancelled` | ลำดับสถานะของแต่ละงานในคิว |
+| `jobs[].message` | ข้อความ (String) | รายละเอียดผลลัพธ์ หรือสาเหตุเมื่องานไม่สำเร็จ (`failed`) |
+| `jobs[].created` | Unix timestamp | เวลาที่สร้างคำสั่งงาน |
+| `log` | Array of Strings | รายการข้อความ log ล่าสุดของโปรแกรมควบคุมการหยิบ |
+
+```
+
+Would you like me to translate the entire document into one language (all English or all Thai), or add a directory tree section showing how the `cpp/`, `python/`, `models/`, and `calibration/` folders are organized?
+
+```
