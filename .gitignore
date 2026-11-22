@@ -2,3 +2,4 @@ python/.armbot_certs/
 calibration/mqtt.json
 calibration/mqtt.panplay.json
 captures/
+calibration/marker_memory.json

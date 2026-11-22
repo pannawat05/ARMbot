@@ -53,7 +53,9 @@
     const item = o.item_id ? items.find((i) => i.id === o.item_id) : o.barcode ? items.find((i) => i.barcode === o.barcode) : findItem(o.text ?? '');
     if (!item) throw new Error('ไม่พบของชิ้นนี้');
     const count = Math.max(1, Math.min(Math.round(o.count ?? 1), Math.max(1, item.stock)));
-    await link.queue({ item_id: item.id, source: o.source, count });
+    // A job_id of our own lets the receiving dashboard tie its inspection result to this order.
+    const job_id = `armbot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    await link.queue({ item_id: item.id, source: o.source, count, job_id });
     show(`เพิ่ม ${item.name_th}${count > 1 ? ` ${count} ชิ้น` : ''} เข้าคิวแล้ว`);
     return { item };
   }
@@ -157,7 +159,7 @@
         </div>
       {/if}
       <QueuePanel {status} oncancel={(id) => link?.cancel(id)} onstop={() => link?.stop()} />
-      <InspectionPanel results={inspections} />
+      <InspectionPanel results={inspections} onreview={(key, decision) => link?.review(key, decision)} />
     </section>
   </main>
 {:else}
@@ -173,7 +175,7 @@
       <CameraView {status} snapshot={camera} cloud={link?.cloud} />
       <VoiceBar {voice} />
       <QueuePanel {status} log oncancel={(id) => link?.cancel(id)} onstop={() => link?.stop()} />
-      <InspectionPanel results={inspections} />
+      <InspectionPanel results={inspections} onreview={(key, decision) => link?.review(key, decision)} />
     </aside>
     <section class="items">
       <button class="scan-test" onclick={() => startScan(true)}>ทดลองสแกนบาร์โค้ด (ไม่สั่งแขนกล)</button>

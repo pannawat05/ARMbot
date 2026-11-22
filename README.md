@@ -103,7 +103,9 @@ python python/robot_pipeline.py --dry-run --show
 | `<p>/event` | JSON `{"type":"queued","job":{...},"item":{...}}` หรือ `{"type":"unknown","query":{...}}` | 1 | ไม่ | ตอบกลับทันทีทุกครั้งที่ได้รับคำสั่ง `<p>/cmd/queue` | ยืนยันว่าเพิ่มงานสำเร็จ (`queued`) หรือไม่พบสินค้า (`unknown`) สำหรับ client ภายนอก (หน้าเว็บปัจจุบันไม่ได้ใช้) |
 | `<p>/unknown` | JSON (`type`, `message`, `time`, `job_id`, `image_size`, `box`, `box_center_size`, `file`) | 1 | ไม่ | เมื่อโหมดเดาวัตถุ (`yolo_class: "unknown"`) พบวัตถุที่ไม่มีคลาส | แจ้งพิกัดกรอบวัตถุ (`box` = พิกเซล, `box_center_size` = ค่า normalized 0–1) ภาพต้นฉบับและ label บันทึกไว้ที่ `captures/unknown/` บน Pi ใช้ร่วมกับ `python/watch_unknown.py` |
 | `<p>/unknown/image` | JPEG binary (วาดกรอบสีแดง) | 0 | ไม่ | ส่งทันทีหลังจาก `<p>/unknown` | ภาพถ่ายวัตถุที่ไม่รู้จัก ใช้แสดงผลคู่กับ topic ด้านบน |
-| `<p>/inspection/latest` | JSON ผลตรวจล่าสุด (`event_id`, `job_id`, `requested`, `detected`, `completed_at`, `image` เป็น base64) | 1 | ใช่ | เมื่อ Pi รับ `<p>/inspection/result` ใหม่ที่ผ่านการตรวจแล้ว | ให้หน้า Dashboard แสดงผลตรวจและรูปทันที แม้เปิดหน้าทีหลังหรือใช้ผ่านคลาวด์ |
+| `<p>/inspection/latest` | JSON ผลตรวจล่าสุด (`key`, `status` = `completed`/`not_found`/`incomplete`, `job_id`, `requested`, `detected`, `image` เป็น base64 หรือ `null`) | 1 | ใช่ | เมื่อ Pi รับ `<p>/inspection/result` ใหม่ที่ผ่านการตรวจแล้ว | ให้หน้า Dashboard แสดงผลตรวจและรูปทันที แม้เปิดหน้าทีหลังหรือใช้ผ่านคลาวด์ |
+| `<p>/inspection/review/latest` | JSON คำขอตรวจ Unknown ล่าสุด (`key`, `request_id`, `job_id`, `requested`, `decision`, `image`) | 1 | ใช่ | เมื่อรับคำขอใหม่ หรือเมื่อตอบคำขอแล้ว | ให้หน้า Dashboard แสดงคำขอที่รอตรวจพร้อมปุ่มตอบ |
+| `<p>/inspection/unknown/response` | JSON `{"schema_version":1,"type":"unknown_review_response","request_id","job_id","armbot_job_id","decision":"approved"\|"rejected","note","reviewed_at"}` | 1 | ไม่ | เมื่อกดปุ่ม "ถูกต้อง"/"ไม่ถูกต้อง" บน Dashboard | ผลตรวจ Unknown ส่งกลับไปที่ Dashboard ฝั่งรับของ โดยใช้ `request_id` เดิม (ฝั่งรับของต้องเพิ่มตัวรับ topic นี้) |
 | `<p>/camera` | JPEG binary (`320×240`) | 0 | ไม่ | ทุก `camera_every_s` วินาที (ค่าเริ่มต้น `1`, ตั้ง `0` เพื่อปิด) เมื่อกล้องพร้อมใช้งาน | ภาพสดจากกล้องสำหรับหน้าเว็บ Cloud |
 
 ---
@@ -119,7 +121,9 @@ python python/robot_pipeline.py --dry-run --show
 |  | `{"text":"เอารีเลย์","source":"mqtt","quantity":1}` | ค้นหาสินค้าจากคำใน `aliases` |
 | `<p>/cmd/cancel` | `{"id":3}` | ยกเลิกงานหมายเลข `3` (หากกำลังหยิบอยู่จะหยุดและกลับท่าพักทันที) |
 | `<p>/cmd/stop` | `{}` | **หยุดฉุกเฉิน:** หยุดงานปัจจุบัน ยกเลิกงานทั้งหมดในคิว และกลับสู่ท่าพัก (`rest pose`) |
-| `<p>/inspection/result` | `{"type":"inspection_result","status":"completed","job_id","event_id","requested","detected","image":{"encoding":"base64","data"}}` (QoS 1) | รับผลตรวจและรูปจาก Dashboard ฝั่งรับของ ตัดข้อความซ้ำด้วย `event_id` เก็บรูปที่ `captures/inspection/` (ล่าสุด 20) และผูกกับคิวที่ส่ง `job_id` เดียวกัน เปลี่ยน topic ได้ด้วย `result_topic` ใน `calibration/mqtt.json` หรือ `MQTT_RESULT_TOPIC` |
+| `<p>/inspection/result` | `{"type":"inspection_result","status":"completed"\|"not_found"\|"incomplete","job_id","event_id" หรือ "result_id","requested","detected","image"}` (QoS 1) | รับผลตรวจจาก Dashboard ฝั่งรับของ ตัดข้อความซ้ำด้วย `event_id` (หรือ `result_id` เมื่อกล้องหมดเวลา ซึ่งอาจไม่มีรูป) เก็บที่ `captures/inspection/` (ล่าสุด 20) และผูกกับคิวที่ส่ง `job_id` เดียวกัน (หรือ `armbot_job_id` = เลขงานของเรา) เปลี่ยน topic ได้ด้วย `result_topic` ใน `calibration/mqtt.json` หรือ `MQTT_RESULT_TOPIC` |
+| `<p>/inspection/unknown/request` | `{"type":"unknown_review_request","request_id","job_id","armbot_job_id","requested","image"}` (QoS 1) | คำขอให้ทีมตรวจ Unknown (เรา) ดูภาพเฟรมแรกจากกล้องฝั่งรับของ ตัดซ้ำด้วย `request_id` แสดงบน Dashboard ในส่วน "รอทีมตรวจ Unknown" |
+| `<p>/cmd/review` | `{"key":"queue-43","decision":"approved","note":""}` | ตอบคำขอตรวจ Unknown จาก Dashboard ของเรา (โหมด HTTP ใช้ `POST /api/reviews/<key>`) แล้ว Pi ส่งผลไปที่ `<p>/inspection/unknown/response` |
 
 > **หมายเหตุสำหรับ `<p>/cmd/queue`:**
 > * เลือกระบุตัวระบุสินค้าเพียง **อย่างใดอย่างหนึ่ง** จาก `item_id`, `barcode` หรือ `text`

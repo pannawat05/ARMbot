@@ -16,7 +16,8 @@ self-signed certificate is made on first start; accept the browser warning once.
 
 API: GET /api/items, GET /api/status, POST /api/queue {"item_id"|"barcode"|"text", "count", "job_id"},
 DELETE /api/queue/<id>, POST /api/stop, GET /stream.mjpg, GET /mqtt.json,
-GET /api/inspections (results from the receiving dashboard), GET /api/inspections/<event_id>.jpg.
+GET /api/inspections (results and Unknown review requests from the receiving dashboard),
+GET /api/inspections/<key>.jpg, POST /api/reviews/<key> {"decision": "approved"|"rejected", "note"}.
 
 MQTT (calibration/mqtt.json, skipped with --no-mqtt), with <p> the prefix ("armbot"):
   published, retained:  <p>/online "1"/"0", <p>/items, <p>/status (same JSON as the API)
@@ -26,15 +27,21 @@ MQTT (calibration/mqtt.json, skipped with --no-mqtt), with <p> the prefix ("armb
                         sees an object that has no class; the clean image and a YOLO-format
                         label are saved in captures/unknown/ (newest MAX_CAPTURES kept),
                         <p>/camera JPEG 320x240 every camera_every_s (default 1 s; 0 = off)
-                        <p>/inspection/latest (retained) the newest inspection result, picture
-                        included, for the dashboards
+                        <p>/inspection/latest and <p>/inspection/review/latest (retained) the newest
+                        inspection result and Unknown review request, picture included, for the
+                        dashboards; <p>/inspection/unknown/response our review decision
+                        {"type": "unknown_review_response", "request_id", "decision", ...}
   subscribed:           <p>/cmd/queue {"item_id"|"barcode"|"text", "source", "count", "job_id"},
                         <p>/cmd/cancel {"id"}, <p>/cmd/stop {},
                         <p>/inspection/result (QoS 1; mqtt.json "result_topic" or the environment
                         variable MQTT_RESULT_TOPIC to change it): the receiving dashboard's
-                        inspection result with its JPEG as base64, matched to a queued job by
-                        the job_id that came with the queue command; pictures go to
-                        captures/inspection/ (newest MAX_INSPECTIONS kept)
+                        inspection result (completed with its JPEG as base64, or not_found /
+                        incomplete after a camera timeout, maybe without one), matched to a job
+                        by the job_id that came with the queue command (or armbot_job_id);
+                        <p>/inspection/unknown/request: an Unknown review request with the
+                        receiving camera's first frame; <p>/cmd/review {"key", "decision"} from
+                        our dashboard answers it. Pictures go to captures/inspection/ (newest
+                        MAX_INSPECTIONS kept)
 
 Safety: anyone who can reach the port can move the arm. Stop (button or POST /api/stop)
 ends the current pick at the next camera look and sends the arm to the rest pose, the
@@ -66,6 +73,7 @@ from pick_and_place import DryRunQuiet, open_camera  # noqa: E402
 from servo_control_app import Pca9685  # noqa: E402
 
 INVENTORY = ROOT / "calibration" / "inventory.json"
+MARKER_MEMORY = ROOT / "calibration" / "marker_memory.json"  # base angle and reach of the last place
 MQTT_CONFIG = ROOT / "calibration" / "mqtt.json"
 DIST = ROOT / "dashboard" / "dist"
 CAPTURES = ROOT / "captures" / "unknown"  # images and boxes of objects with no class
@@ -219,73 +227,162 @@ class Inventory:
             os.replace(tmp, self.path)
 
 
+RESULT_STATUSES = ("completed", "not_found", "incomplete")  # inspection_result statuses we accept
+REVIEW_DECISIONS = ("approved", "rejected")
+
+
+def _decode_jpeg(image, required):
+    """(jpeg bytes or None, error or None) from a message's image object {"encoding": "base64", "data"}."""
+    if image is None and not required:
+        return None, None
+    if not isinstance(image, dict) or image.get("encoding") != "base64" or not isinstance(image.get("data"), str):
+        return None, "no base64 image"
+    try:
+        jpeg = base64.b64decode(image["data"], validate=True)
+    except (binascii.Error, ValueError):
+        return None, "image is not base64"
+    if not jpeg.startswith(b"\xff\xd8") or len(jpeg) > MAX_RESULT_BYTES:
+        return None, "image is not a JPEG or is too big"
+    return jpeg, None
+
+
+def _counts(value):
+    return {str(k): n for k, n in value.items() if type(n) is int} if isinstance(value, dict) else {}
+
+
 class InspectionStore:
-    """Inspection results (counts and a picture) sent back by the receiving dashboard."""
+    """Messages from the receiving dashboard kept with their pictures: inspection results
+    (completed, not_found, incomplete) or Unknown review requests. Each has a "key" made from
+    the sender's dedupe id (event_id, result_id or request_id), safe as a file name."""
 
     def __init__(self, folder=INSPECTIONS, keep=MAX_INSPECTIONS):
         self.folder, self.keep = folder, keep
         self.lock = threading.Lock()
-        self.results = []  # newest last; each is the message without its picture, plus "image_file"
+        self.items = []  # newest last; each is the message without its picture, plus "image_file"
         self.folder.mkdir(parents=True, exist_ok=True)
         for old in sorted(self.folder.glob("*.json"), key=lambda f: f.stat().st_mtime)[-keep:]:
             try:
-                self.results.append(json.loads(old.read_text("utf-8")))
+                item = json.loads(old.read_text("utf-8"))
             except (OSError, ValueError):
-                pass
+                continue
+            item.setdefault("key", old.stem)  # saved before keys existed: named by event_id
+            self.items.append(item)
 
     @staticmethod
-    def parse(raw):
-        """(result, jpeg) from one MQTT message, or (None, reason) when it is not a usable result."""
+    def _key(value):
+        return "".join(c if c.isalnum() or c in "_-" else "-" for c in str(value))[:100]
+
+    @staticmethod
+    def _load(raw, kind):
         if len(raw) > MAX_RESULT_BYTES:
             return None, "message too big"
         try:
             body = json.loads(raw)
         except (ValueError, UnicodeError):
             return None, "not JSON"
-        if not isinstance(body, dict) or body.get("type") != "inspection_result" or body.get("status") != "completed":
-            return None, "not a completed inspection_result"
-        event_id, job_id = body.get("event_id"), body.get("job_id")
-        if type(event_id) is not int or not isinstance(job_id, str) or not job_id or len(job_id) > 100:
-            return None, "event_id or job_id missing"
-        image = body.get("image")
-        if not isinstance(image, dict) or image.get("encoding") != "base64" or not isinstance(image.get("data"), str):
-            return None, "no base64 image"
-        try:
-            jpeg = base64.b64decode(image["data"], validate=True)
-        except (binascii.Error, ValueError):
-            return None, "image is not base64"
-        if not jpeg.startswith(b"\xff\xd8") or len(jpeg) > MAX_RESULT_BYTES:
-            return None, "image is not a JPEG or is too big"
-        counts = lambda v: {str(k): n for k, n in v.items() if type(n) is int} if isinstance(v, dict) else {}
-        result = {"event_id": event_id, "job_id": job_id, "armbot_job_id": body.get("armbot_job_id"),
-                  "status": "completed", "completed_at": str(body.get("completed_at") or ""),
-                  "requested": counts(body.get("requested")), "detected": counts(body.get("detected")),
-                  "received_at": time.time(), "image_file": f"{event_id}.jpg"}
+        if not isinstance(body, dict) or body.get("type") != kind:
+            return None, f"not an {kind}"
+        job_id = body.get("job_id")
+        if not isinstance(job_id, str) or not job_id or len(job_id) > 100:
+            return None, "job_id missing"
+        return body, None
+
+    @classmethod
+    def parse_result(cls, raw):
+        """(result, jpeg or None) from an inspection_result message, or (None, reason). A completed
+        result carries its picture; not_found and incomplete (camera timeout) may have none."""
+        body, err = cls._load(raw, "inspection_result")
+        if body is None:
+            return None, err
+        status = body.get("status")
+        if status not in RESULT_STATUSES:
+            return None, f"unknown status {status!r}"
+        if type(body.get("event_id")) is int:
+            dedupe = f"event-{body['event_id']}"
+        elif isinstance(body.get("result_id"), str) and body["result_id"]:
+            dedupe = body["result_id"]
+        else:
+            return None, "neither event_id nor result_id"
+        jpeg, err = _decode_jpeg(body.get("image"), required=status == "completed")
+        if err:
+            return None, err
+        key = cls._key(dedupe)
+        result = {"key": key, "kind": "result", "status": status, "reason": body.get("reason"),
+                  "event_id": body.get("event_id"), "result_id": body.get("result_id"),
+                  "job_id": body["job_id"], "armbot_job_id": body.get("armbot_job_id"),
+                  "completed_at": str(body.get("completed_at") or ""),
+                  "requested": _counts(body.get("requested")), "detected": _counts(body.get("detected")),
+                  "received_at": time.time(), "image_file": f"{key}.jpg" if jpeg else None}
         return result, jpeg
 
-    def add(self, result, jpeg):
-        """Save a parsed result; False when this event_id was already stored (the sender retries)."""
+    @classmethod
+    def parse_review(cls, raw):
+        """(request, jpeg) from an unknown_review_request message, or (None, reason)."""
+        body, err = cls._load(raw, "unknown_review_request")
+        if body is None:
+            return None, err
+        if not isinstance(body.get("request_id"), str) or not body["request_id"]:
+            return None, "request_id missing"
+        jpeg, err = _decode_jpeg(body.get("image"), required=True)
+        if err:
+            return None, err
+        key = cls._key(body["request_id"])
+        request = {"key": key, "kind": "review", "status": str(body.get("status") or "awaiting_review"),
+                   "request_id": body["request_id"], "event_id": body.get("event_id"),
+                   "job_id": body["job_id"], "armbot_job_id": body.get("armbot_job_id"),
+                   "captured_at": str(body.get("captured_at") or ""), "requested": _counts(body.get("requested")),
+                   "decision": None, "note": "", "received_at": time.time(), "image_file": f"{key}.jpg"}
+        return request, jpeg
+
+    def add(self, item, jpeg):
+        """Save a parsed message; False when its key is already stored (the sender retries)."""
         with self.lock:
-            if any(r["event_id"] == result["event_id"] for r in self.results):
+            if any(i["key"] == item["key"] for i in self.items):
                 return False
-            (self.folder / f"{result['event_id']}.jpg").write_bytes(jpeg)
-            (self.folder / f"{result['event_id']}.json").write_text(json.dumps(result, ensure_ascii=False), "utf-8")
-            self.results.append(result)
-            for old in self.results[:-self.keep]:
-                for ext in ("jpg", "json"):
-                    (self.folder / f"{old['event_id']}.{ext}").unlink(missing_ok=True)
-            self.results = self.results[-self.keep:]
+            if jpeg:
+                (self.folder / item["image_file"]).write_bytes(jpeg)
+            self._save(item)
+            self.items.append(item)
+            for old in self.items[:-self.keep]:
+                (self.folder / f"{old['key']}.json").unlink(missing_ok=True)
+                if old.get("image_file"):
+                    (self.folder / old["image_file"]).unlink(missing_ok=True)
+            self.items = self.items[-self.keep:]
         return True
+
+    def _save(self, item):
+        (self.folder / f"{item['key']}.json").write_text(json.dumps(item, ensure_ascii=False), "utf-8")
+
+    def update(self, key, **fields):
+        """Change a stored item (a review decision); the updated copy, or None if unknown."""
+        with self.lock:
+            for item in self.items:
+                if item["key"] == key:
+                    item.update(fields)
+                    self._save(item)
+                    return dict(item)
+        return None
 
     def list(self):
         with self.lock:
-            return list(reversed(self.results))
+            return [dict(i) for i in reversed(self.items)]
 
-    def image(self, event_id):
+    def is_review(self, key):
         with self.lock:
-            known = any(r["event_id"] == event_id for r in self.results)
-        path = self.folder / f"{event_id}.jpg"
-        return path.read_bytes() if known and path.is_file() else None
+            return any(i["key"] == key and i.get("kind") == "review" for i in self.items)
+
+    def image(self, key):
+        with self.lock:
+            name = next((i.get("image_file") for i in self.items if i["key"] == key), None)
+        path = self.folder / name if name else None
+        return path.read_bytes() if path and path.is_file() else None
+
+    def with_image(self, item):
+        """The item as JSON for MQTT, its picture inline as base64 (or null)."""
+        jpeg = self.image(item["key"])
+        return json.dumps({**item, "image": {"content_type": "image/jpeg", "encoding": "base64",
+                                             "data": base64.b64encode(jpeg).decode()} if jpeg else None},
+                          ensure_ascii=False)
 
 
 class Robot:
@@ -305,7 +402,11 @@ class Robot:
         hw = self.main_cfg["hardware"]
         self.pca = Pca9685(hw["i2c_bus"], int(hw["pca9685_address"], 0), keep_outputs=True) if execute else DryRunQuiet()
         self.on_unknown = None  # set by MqttBridge: callback(info, annotated_jpeg)
-        self.marker_memory = {}  # where the ArUco marker was last aimed at; kept between picks
+        # Where the ArUco marker was last aimed at; kept between picks and across restarts.
+        try:
+            self.marker_memory = json.loads(MARKER_MEMORY.read_text("utf-8"))
+        except (OSError, ValueError):
+            self.marker_memory = {}
         self.wake = threading.Event()
         threading.Thread(target=self._worker, daemon=True).start()
 
@@ -328,13 +429,17 @@ class Robot:
         self.wake.set()
         return job
 
-    def inspected(self, result):
-        """Note an inspection result on the queued job it belongs to (same ref), if still listed."""
+    def inspected(self, item):
+        """Note an inspection result or Unknown review on the job it belongs to: the same ref
+        (our sender's job_id) or our own job number as armbot_job_id. Its id, or None."""
         with self.lock:
             for job in self.jobs:
-                if job.get("ref") == result["job_id"]:
-                    job["inspection"] = {"event_id": result["event_id"], "requested": result["requested"],
-                                         "detected": result["detected"]}
+                if job.get("ref") == item["job_id"] or str(job["id"]) == str(item.get("armbot_job_id")):
+                    if item["kind"] == "review":
+                        job["review"] = {"key": item["key"], "status": item["status"], "decision": item["decision"]}
+                    else:
+                        job["inspection"] = {"key": item["key"], "status": item["status"],
+                                             "requested": item["requested"], "detected": item["detected"]}
                     return job["id"]
         return None
 
@@ -424,6 +529,8 @@ class Robot:
             detector.on_unknown = lambda frame, best, box: self._unknown_seen(job, frame, best, box)
             arm = vp.Arm(self.pca, self.main_cfg, vcfg, dry_run=not self.execute)
             picks = vp.auto_run(arm, detector, vcfg, max_picks=1, wait_for_hand=False, memory=self.marker_memory)
+            if self.marker_memory:
+                MARKER_MEMORY.write_text(json.dumps(self.marker_memory), "utf-8")
         except vp.StopRequested:
             print("Stopped from the dashboard. Going to the rest pose.")
             self._rest()
@@ -495,6 +602,8 @@ class MqttBridge:
                 or self.result_topic == f"{self.p}/inspection/latest":
             print(f"MQTT result topic {self.result_topic!r} is not allowed; using the default.")
             self.result_topic = f"{self.p}/inspection/result"
+        self.review_topic = f"{self.p}/inspection/unknown/request"  # Unknown review requests to us
+        self.response_topic = f"{self.p}/inspection/unknown/response"  # our decisions, by request_id
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"armbot-{os.uname().nodename}")
         if cfg.get("username"):  # public brokers such as broker.hivemq.com take no login
             self.client.username_pw_set(cfg["username"], cfg.get("password"))
@@ -522,31 +631,56 @@ class MqttBridge:
             print(f"MQTT connection refused: {reason}")
             return
         print(f"MQTT connected; topics {self.p}/#")
-        client.subscribe([(f"{self.p}/cmd/#", 1), (self.result_topic, 1)])
+        client.subscribe([(f"{self.p}/cmd/#", 1), (self.result_topic, 1), (self.review_topic, 1)])
         client.publish(f"{self.p}/online", "1", qos=1, retain=True)
         self._send("items", {"items": self.inventory.items()}, retain=True)
 
-    def _result(self, payload):
-        """An inspection result from the receiving dashboard: keep it, tell the job, pass it on."""
+    def _received(self, payload, kind):
+        """An inspection result or Unknown review request from the receiving dashboard: keep it,
+        note it on its job, and pass it on to our dashboards (retained, picture included)."""
         if self.inspections is None:
             return
-        result, jpeg = self.inspections.parse(payload)
-        if result is None:
-            print(f"Inspection result ignored: {jpeg}.")
+        parse = self.inspections.parse_review if kind == "review" else self.inspections.parse_result
+        item, jpeg = parse(payload)
+        if item is None:
+            print(f"Inspection {kind} ignored: {jpeg}.")
             return
-        if not self.inspections.add(result, jpeg):
+        if not self.inspections.add(item, jpeg):
             return  # the sender retries until the broker confirms; the first copy is enough
-        job = self.robot.inspected(result)
-        print(f"Inspection result for {result['job_id']} (event {result['event_id']}): "
-              f"asked {result['requested']}, found {result['detected']}"
-              + (f"; job {job}" if job else "; no queued job with that id") + ".")
-        self.client.publish(f"{self.p}/inspection/latest", json.dumps(
-            {**result, "image": {"content_type": "image/jpeg", "encoding": "base64",
-                                 "data": base64.b64encode(jpeg).decode()}}), qos=1, retain=True)
+        job = self.robot.inspected(item)
+        what = (f"Unknown review request {item['request_id']}: asked {item['requested']}" if kind == "review" else
+                f"Inspection {item['status']} {item['key']}: asked {item['requested']}, found {item['detected']}")
+        print(f"{what} for {item['job_id']}" + (f"; job {job}" if job else "; no queued job with that id") + ".")
+        self.publish_item(item)
+
+    def publish_item(self, item):
+        topic = "inspection/review/latest" if item["kind"] == "review" else "inspection/latest"
+        self.client.publish(f"{self.p}/{topic}", self.inspections.with_image(item), qos=1, retain=True)
+
+    def decide(self, key, decision, note=""):
+        """Our answer to an Unknown review request: saved, noted on the job, sent back on
+        <p>/inspection/unknown/response with the same request_id. The updated request, or None."""
+        if decision not in REVIEW_DECISIONS or not self.inspections.is_review(key):
+            return None
+        item = self.inspections.update(key, decision=decision, note=str(note)[:500],
+                                       status=decision, reviewed_at=time.time())
+        self.robot.inspected(item)
+        self._send_to(self.response_topic, {
+            "schema_version": 1, "type": "unknown_review_response", "request_id": item["request_id"],
+            "job_id": item["job_id"], "armbot_job_id": item["armbot_job_id"], "decision": decision,
+            "note": item["note"], "reviewed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+        print(f"Unknown review {item['request_id']}: {decision}" + (f" ({item['note']})" if item["note"] else "") + ".")
+        self.publish_item(item)
+        return item
+
+    def _send_to(self, topic, body):
+        self.client.publish(topic, json.dumps(body, ensure_ascii=False), qos=1, retain=False)
 
     def _message(self, _client, _userdata, msg):
         if msg.topic == self.result_topic:
-            return self._result(msg.payload)
+            return self._received(msg.payload, "result")
+        if msg.topic == self.review_topic:
+            return self._received(msg.payload, "review")
         try:
             body = json.loads(msg.payload or b"{}")
         except json.JSONDecodeError:
@@ -564,6 +698,8 @@ class MqttBridge:
             self.robot.cancel(int(body.get("id", 0)))
         elif cmd == "stop":
             self.robot.stop()
+        elif cmd == "review" and self.inspections is not None:  # from our dashboard in MQTT mode
+            self.decide(InspectionStore._key(body.get("key", "")), body.get("decision"), body.get("note", ""))
 
     def _publisher(self):
         last_status = last_items = None
@@ -604,7 +740,7 @@ class QuietServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def make_handler(robot, inventory, hub, log, mqtt_cfg=None, inspections=None):
+def make_handler(robot, inventory, hub, log, mqtt_cfg=None, inspections=None, decide=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -637,8 +773,8 @@ def make_handler(robot, inventory, hub, log, mqtt_cfg=None, inspections=None):
                 return self._stream()
             if path == "/api/inspections":
                 return self._json({"results": inspections.list() if inspections else []})
-            if path.startswith("/api/inspections/") and path.endswith(".jpg") and path[17:-4].isdigit():
-                jpeg = inspections.image(int(path[17:-4])) if inspections else None
+            if path.startswith("/api/inspections/") and path.endswith(".jpg"):
+                jpeg = inspections.image(InspectionStore._key(path[17:-4])) if inspections else None
                 if jpeg is None:
                     return self._json({"error": "not found"}, 404)
                 self.send_response(200)
@@ -666,6 +802,19 @@ def make_handler(robot, inventory, hub, log, mqtt_cfg=None, inspections=None):
                                                     body.get("count", body.get("quantity", 1)), ref), "item": item})
             if path == "/api/stop":
                 return self._json({"stopping": robot.stop()})
+            if path.startswith("/api/reviews/"):  # {"decision": "approved"|"rejected", "note"}
+                body = self._body()
+                key = InspectionStore._key(path[len("/api/reviews/"):])
+                if decide:
+                    item = decide(key, body.get("decision"), body.get("note", ""))
+                elif inspections and body.get("decision") in REVIEW_DECISIONS and inspections.is_review(key):
+                    # no MQTT: the decision stays here
+                    item = inspections.update(key, decision=body["decision"], status=body["decision"],
+                                              note=str(body.get("note", ""))[:500], reviewed_at=time.time())
+                else:
+                    item = None
+                return self._json({"review": item} if item else {"error": "unknown request or decision"},
+                                  200 if item else 400)
             self._json({"error": "not found"}, 404)
 
         def do_DELETE(self):
@@ -743,7 +892,8 @@ def main():
     mqtt_cfg = None if args.no_mqtt or not MQTT_CONFIG.exists() else json.loads(MQTT_CONFIG.read_text("utf-8"))
     inspections = InspectionStore()
     bridge = MqttBridge(mqtt_cfg, robot, inventory, log, hub, inspections) if mqtt_cfg else None
-    server = QuietServer(("0.0.0.0", args.port), make_handler(robot, inventory, hub, log, mqtt_cfg, inspections))
+    server = QuietServer(("0.0.0.0", args.port), make_handler(robot, inventory, hub, log, mqtt_cfg, inspections,
+                                                              bridge.decide if bridge else None))
     scheme = "http"
     if not args.http:
         cert, key = ensure_certificate()

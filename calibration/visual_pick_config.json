@@ -202,8 +202,12 @@
       8
     ],
     "looks_per_stop": 2,
+    "marker_base_deg": 45.0,
+    "_note_marker_base": "2026-11-22: where to look first for the marker when nothing is remembered (after a restart); the marker was placed at base +34 to +54 today. The last place found is remembered in calibration/marker_memory.json and wins.",
     "carry_tip_mm": 85.0,
-    "drop_tip_mm": 80.0
+    "drop_tip_mm": 120.0,
+    "_old_drop_tip_mm": 80.0,
+    "_note_drop": "2026-11-22: drop_tip_mm 120 (was 80) and the arm now moves out at the carrying height before going straight down: going out and down in one diagonal line (it ended at tip ~63 mm) pushed the held object into the basket wall and shoved the basket away. Raise it more if the object still touches the rim; lower it if objects bounce out."
   },
   "_note_objects": "objects: per-class values laid over approach / limits / place, for objects that are not relay-sized. Heights are real table heights of the gripper tip. bananapi is a 95 mm tall box: search and aim stay above it, the jaws move out over it at align_tip_mm, then grip 25 mm below its top.",
   "objects": {
@@ -216,8 +220,9 @@
         "gripper_offset_mm": 125.0,
         "target_u_frac": 0.5,
         "target_v_frac": 0.5,
-        "gripper_offset_slope": 0.0,
-        "offset_ref_tip_mm": 130.0,
+        "gripper_offset_slope": 0.76,
+        "offset_ref_tip_mm": 165.0,
+        "_note_slope": "2026-11-22: slope 0.76 at 165 mm (was 0 at 130). 125 mm was tuned picking from the search heights (tip 155-187); aiming first lowers the camera to tip 125-150, where it looks less far ahead, and the same relay came out 206 mm away instead of about 184 (past the reach, jaws short). The camera view ahead grows with height (125 / 165 = 0.76 mm per mm). The relay, triple syringe and guess take these via offsets_from.",
         "_old_teach_2026_11_13": {
           "gripper_offset_mm": 52.5,
           "gripper_offset_slope": -1.188,
@@ -295,10 +300,14 @@
     },
     "unknown": {
       "approach": {
-        "aim_before_pick": false,
-        "commit_detections": 1,
+        "aim_before_pick": true,
+        "commit_detections": 3,
+        "confirm_looks": 2,
+        "max_lost": 6,
+        "_note_lost": "2026-11-22: confirm_looks 2 = seen twice in a row at the same spot before aiming (glare and passing hands are gone by the next look). A spot lost twice from the same search pose is ignored for the rest of the pick, and after max_lost losses the pick stops with a message instead of looping until cancelled.",
         "grip_tip_mm": 30.0
       },
+      "_note_aim": "2026-11-22: aims first, then goes down (aim_before_pick true, 3 sightings), like the HC-SR04, relay and triple syringe; aiming also lets the part-of-the-arm check run, since the base turns between looks.",
       "_note": "2026-11-13: the guess pick starts on the first detection and trusts it (no aiming steps, one sighting), like the HC-SR04 and relay. Guess objects have no size ruler, so the landing uses the fixed base_deg_per_u and mm_per_image_height estimates, and the 'part of the arm' check (which needs the base to turn between looks) never runs.",
       "limits": {
         "min_tip_height_mm": 24.0
@@ -363,6 +372,11 @@
   },
   "guess": {
     "_note": "Object name 'unknown' (dashboard item 'unknown'): picks the solid thing nearest the middle of the image that is not the table colour, for objects YOLO has no class for. table_hsv_low/high is the table colour (the green mat). Only a circle of view_frac of the image round the aim point is searched. min_fill (area / box area) and min_size_px (shortest side) skip thin shapes such as cables; min/max_area_frac are of the whole image. ArUco markers are skipped, and so is anything that looks like white paper (over 75% colourless and over paper_bright_frac bright, with over paper_dark_frac black print), since a blurred marker is often missed by ArUco. A spot that moves less than arm_spot_frac of the image while the base turns arm_check_deg is part of the arm (a jaw or cable in view) and is ignored for the rest of that pick.",
+    "basket_base_range_deg": [5.0, 65.0],
+    "_note_basket_range": "2026-11-22: measured: the basket edge was picked at base angle +10 to +12 (u 0.75-0.79 from base 0) and the marker in it was placed at +34 and +50, so the basket covers about +5 to +65. Nothing to the right of +5 deg is guessed; move the basket or change this range if objects go there. Set it to null to use the marker angle plus or minus basket_keepout_deg instead.",
+    "basket_keepout_deg": 25.0,
+    "basket_base_deg": 34.0,
+    "_note_basket": "2026-11-22: the guess skips anything whose direction (base angle plus base_deg_per_u across the image) is within basket_keepout_deg of the destination marker: the white basket stands out from the mat like an object and was picked. The marker angle comes from the last place (marker memory); basket_base_deg is used until the first place after a restart.",
     "table_hsv_low": [
       35,
       40,
@@ -375,13 +389,17 @@
     ],
     "view_frac": 0.4,
     "min_area_frac": 0.005,
-    "max_area_frac": 0.15,
+    "max_area_frac": 0.35,
+    "_old_max_area_frac": 0.15,
+    "_note_max_area": "2026-11-22: 0.35 (was 0.15). The same solder tin covers 14% of the image when centred from tip ~160 mm and 20-28% from the last aiming heights, so it was dropped as too big right before the pick. The view circle (view_frac 0.4) holds at most about 38% of the image.",
     "min_fill": 0.25,
     "min_size_px": 20,
     "arm_check_deg": 15,
     "arm_spot_frac": 0.06,
     "paper_bright_frac": 0.6,
-    "paper_dark_frac": 0.02
+    "paper_dark_frac": 0.15,
+    "_old_paper_dark_frac": 0.02,
+    "_note_paper_dark": "2026-11-22: 0.15 (was 0.02). A white tin with black and red print (a solder reel) was found from afar but counted as a missed ArUco marker once the aim brought its whole label into view (dark 3-4% of its pixels even half in view), so it vanished at the last aiming step every time. The marker itself is about half black (16% even on the whole A4 sheet with its margins) and sits in the basket, which the guess skips anyway."
   },
   "motion": {
     "_note": "Every arm move speeds up at accel_deg_per_s2 to its top speed (approach ramp_deg_per_s, grip carry_deg_per_s when holding), holds it, and slows down at the same rate before the target, so it starts and stops without a jerk. carry_accel_deg_per_s2 is used while an object is held. Lower = smoother but slower.",

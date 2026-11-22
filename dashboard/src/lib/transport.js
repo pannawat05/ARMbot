@@ -10,8 +10,10 @@
 // Dockerfile.cloud), /config.json carries the broker settings. The page then uses MQTT only,
 // keeps retrying, and shows the camera from the Pi's <prefix>/camera snapshots.
 // Both give the same interface: status, item and inspection-result updates, plus queue / cancel / stop.
-// Inspection results (counts and a picture from the receiving dashboard) come from the Pi's
-// retained <prefix>/inspection/latest, or from /api/inspections over HTTP.
+// Inspection results (counts and a picture from the receiving dashboard) and Unknown review
+// requests come from the Pi's retained <prefix>/inspection/latest and
+// <prefix>/inspection/review/latest, or from /api/inspections over HTTP; review(key, decision)
+// answers a request (<prefix>/cmd/review, or POST /api/reviews/<key>).
 
 import * as api from './api.js';
 
@@ -51,8 +53,9 @@ async function connectMqtt(cfg, { onStatus, onItems, onOnline, onCamera, onInspe
     reconnectPeriod: 2000,
     connectTimeout: MQTT_CONNECT_MS,
   });
-  const topics = [`${p}/status`, `${p}/items`, `${p}/online`, `${p}/inspection/latest`, ...(onCamera ? [`${p}/camera`] : [])];
-  const results = new Map(); // event_id -> result, newest 20 kept
+  const topics = [`${p}/status`, `${p}/items`, `${p}/online`, `${p}/inspection/latest`, `${p}/inspection/review/latest`,
+    ...(onCamera ? [`${p}/camera`] : [])];
+  const results = new Map(); // key -> result or review request, newest 20 kept
   const subscribe = () => client.subscribe(topics);
   if (mustConnect) {
     await new Promise((resolve, reject) => {
@@ -76,11 +79,12 @@ async function connectMqtt(cfg, { onStatus, onItems, onOnline, onCamera, onInspe
     const body = JSON.parse(text);
     if (topic === `${p}/status`) onStatus(body);
     if (topic === `${p}/items`) onItems(body.items);
-    if (topic === `${p}/inspection/latest` && body.image?.data) {
-      results.set(body.event_id, { ...body, image: `data:image/jpeg;base64,${body.image.data}` });
+    if (topic === `${p}/inspection/latest` || topic === `${p}/inspection/review/latest`) {
+      const key = body.key ?? `event-${body.event_id}`;
+      results.set(key, { ...body, key, image: body.image?.data ? `data:image/jpeg;base64,${body.image.data}` : null });
       const newest = [...results.values()].sort((a, b) => b.received_at - a.received_at).slice(0, 20);
       results.clear();
-      newest.forEach((r) => results.set(r.event_id, r));
+      newest.forEach((r) => results.set(r.key, r));
       onInspections?.(newest);
     }
   });
@@ -93,6 +97,7 @@ async function connectMqtt(cfg, { onStatus, onItems, onOnline, onCamera, onInspe
     queue: (order) => send('queue', order),
     cancel: (id) => send('cancel', { id }),
     stop: () => send('stop', {}),
+    review: (key, decision, note = '') => send('review', { key, decision, note }),
     close: () => client.end(true),
   };
 }
@@ -102,7 +107,9 @@ function connectHttp({ onStatus, onItems, onOnline, onInspections }) {
     api.getStatus().then((s) => (onStatus(s), onOnline(true))).catch(() => onOnline(false));
   const items = () => api.getItems().then(onItems).catch(() => {});
   const inspections = () =>
-    api.getInspections().then((list) => onInspections?.(list.map((r) => ({ ...r, image: `/api/inspections/${r.event_id}.jpg` })))).catch(() => {});
+    api.getInspections()
+      .then((list) => onInspections?.(list.map((r) => ({ ...r, image: r.image_file ? `/api/inspections/${r.key}.jpg` : null }))))
+      .catch(() => {});
   status();
   items();
   inspections();
@@ -112,6 +119,7 @@ function connectHttp({ onStatus, onItems, onOnline, onInspections }) {
     queue: (order) => api.queuePick(order).then(status),
     cancel: (id) => api.cancelJob(id).then(status),
     stop: () => api.stopRobot().then(status),
+    review: (key, decision, note = '') => api.reviewUnknown(key, decision, note).then(inspections),
     close: () => timers.forEach(clearInterval),
   };
 }

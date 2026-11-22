@@ -100,10 +100,15 @@ from pick_and_place import (  # noqa: E402
 from servo_control_app import Pca9685, angle_to_us, us_to_angle  # noqa: E402
 
 VISUAL_CONFIG = ROOT / "calibration" / "visual_pick_config.json"
+MARKER_MISSES = ROOT / "captures" / "marker_miss"  # camera frames of marker searches that failed
+MAX_MARKER_MISSES = 60
 TICK_S = 0.02
 DIRECTION_TEST_DEG = 8.0
 START_GAP_S = 0.4
 NEAR_LIMIT = 0.25  # how far, in image widths, a tracked blob may move between looks
+SAME_SPOT = 0.10  # image distance under which two sightings from the same pose are the same spot
+LIMIT_SLACK_DEG = 1.0  # a servo angle this far past its limit (readback rounding) is held at the limit
+SAME_POSE_DEG = 3.0  # joint difference under which two poses look at the same place
 TEACH_STEPS_MM = (0, -20, 20, -40, 40, -60, 60)
 MAX_TEACH_SLOPE = 0.5  # largest believable change of the camera-to-jaw offset per mm of aiming height  # --teach: tip moves along the reach to find the object
 GUESS_CLASS = "unknown"  # object name for something YOLO has no class for: find_guess finds it
@@ -243,6 +248,10 @@ class Arm:
     def servo_deg(self, name, offset):
         deg = self.neutral[name] + self.signs[name] * offset
         j = self.joints[name]
+        # The chip works in steps of about 0.4 deg, so a joint left at its limit reads back a
+        # hair past it: that is the limit, not a fault.
+        if j["min_deg"] - LIMIT_SLACK_DEG <= deg <= j["max_deg"] + LIMIT_SLACK_DEG:
+            deg = min(j["max_deg"], max(j["min_deg"], deg))
         if not j["min_deg"] <= deg <= j["max_deg"]:
             raise SystemExit(f"ABORT: {name} servo {deg:.1f}° is outside {j['min_deg']}–{j['max_deg']}°.")
         return deg
@@ -262,6 +271,9 @@ class Arm:
             if us is None:
                 return False
             pose[name] = self.signs[name] * (us_to_angle(j["type"], us) - self.neutral[name])
+        for name, (lo, hi) in self.ranges.items():  # readback rounding can land just outside the travel
+            if name in pose and lo - LIMIT_SLACK_DEG <= pose[name] <= hi + LIMIT_SLACK_DEG:
+                pose[name] = min(hi, max(lo, pose[name]))
         self.pose = pose
         return True
 
@@ -399,17 +411,21 @@ class Detector:
         self.guess = class_name == GUESS_CLASS
         self.guess_cfg = vcfg["guess"]
         self.aim = (vcfg["approach"]["target_u_frac"], vcfg["approach"]["target_v_frac"])
+        self.base_deg_per_u = vcfg["approach"]["base_deg_per_u"]
         self.arm = None  # set by find_and_approach, so the guess can tell the arm's own parts
         self.on_unknown = None  # callback(frame, detection, box) for the first sighting of a guess object
         self.unknown_reported = False
         self.marker_finder = None  # blur-tolerant ArUco detector for the guess, made on first use
         self.self_spots = []  # image spots that stayed put while the arm moved: part of the arm
+        self.ignored = []  # (pose, u, v) of guesses lost twice while aiming: glare, a shadow, a hand
+        self.marker_base = None  # base angle towards the destination marker (the basket), if known
         self.seen = []  # (pose, u, v) since the guess started following its current spot
         self.use_color = use_color or self.guess  # neither needs YOLO
         # YOLO alone sees relays on a tool case, so a class with a colour must match it too.
         self.verify_color = not self.use_color and class_name in self.palette["classes"]
         self.confirmed = False  # YOLO has seen it on this approach; colour alone tracks it from here
         self.track = None  # (u, v) of the blob being followed, so a bigger blob elsewhere is ignored
+        self.track_pose = None  # arm pose when self.track was seen (guess only)
         if self.guess:
             print("Guessing: picking whatever stands out from the table (no YOLO).")
         elif use_color:
@@ -458,6 +474,7 @@ class Detector:
             if time.monotonic() - asked >= self.frame_delay_s:
                 break
         frame = turn_frame(frame, self.turn)
+        self.last_frame = frame.copy()  # clean, for saving when the marker search fails
         find = find or (self.find_guess if self.guess else self.find_color if self.use_color else self.find_yolo)
         best, best_box = find(frame)
         # First sighting of an object with no class on this approach: hand the clean frame and
@@ -495,7 +512,29 @@ class Detector:
                 area = float((x2 - x1) * (y2 - y1)) / (w * h)
                 u, v = float(pts[:, 0].mean()) / w, float(pts[:, 1].mean()) / h
                 return (1.0, u, v, area), (int(x1), int(y1), int(x2), int(y2))
+        # Carrying, the arm is still swinging a little and the held object may hide part of the
+        # marker: try the looser detector (more blur and bit errors, half size) before giving up.
+        for pts in self.marker_quads(frame):
+            (x1, y1), (x2, y2) = pts.min(axis=0), pts.max(axis=0)
+            area = float((x2 - x1) * (y2 - y1)) / (w * h)
+            return (0.9, float(pts[:, 0].mean()) / w, float(pts[:, 1].mean()) / h, area), \
+                (int(x1), int(y1), int(x2), int(y2))
         return None, None
+
+    def save_miss(self, label):
+        """Keep the last camera frame of a failed marker search, to see later why it was missed."""
+        frame = getattr(self, "last_frame", None)
+        if frame is None:
+            return
+        try:
+            import cv2
+
+            MARKER_MISSES.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(MARKER_MISSES / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}.jpg"), frame)
+            for old in sorted(MARKER_MISSES.glob("*.jpg"))[:-MAX_MARKER_MISSES]:
+                old.unlink(missing_ok=True)
+        except Exception as e:  # never stop the arm over a diagnostic picture
+            print(f"  Could not save the missed-marker frame: {e}")
 
     def find_yolo_box(self, frame):
         """Position = the centre of YOLO's best box for this class, whatever its size:
@@ -653,15 +692,22 @@ class Detector:
                           and (v < 80).mean() > g["paper_dark_frac"])
             u, v = (x + bw / 2) / w, (y + bh / 2) / h
             on_arm = any(math.hypot(u - su, v - sv) < g["arm_spot_frac"] for su, sv in self.self_spots)
-            if not print_like and not on_arm:
+            if not print_like and not on_arm and not self.skip_guess(u, v):
                 rects.append((x, y, bw, bh))
         if self.track is None:
             self.seen = []
-        near = near or self.track
+        # An aim step since the last look moves the object towards the aim point, far from where
+        # it was in the image, so the old spot no longer says where to look: start again from the
+        # blob nearest the aim point, as on the first look.
+        moved = self.arm is not None and self.track_pose is not None and any(
+            abs(self.arm.pose[k] - self.track_pose[k]) > 1.0 for k in self.track_pose)
+        near = near or (None if moved else self.track)
         if near is None and rects:  # first look: whatever is in front of the camera
             rects = [min(rects, key=lambda r: math.hypot(r[0] + r[2] / 2 - ax, r[1] + r[3] / 2 - ay))]
         best, box = self.choose_rect(rects, w, h, near)
-        self.track = best[1:3] if best else self.track
+        if best:
+            self.track = best[1:3]
+            self.track_pose = dict(self.arm.pose) if self.arm is not None else None
         if best and self.arm is not None:
             self.seen.append((dict(self.arm.pose), best[1], best[2]))
             first, u0, v0 = self.seen[0]
@@ -675,6 +721,25 @@ class Detector:
                 self.track, self.seen = None, []
                 return None, None
         return best, box
+
+    def skip_guess(self, u, v):
+        """True for a guess that must not be picked: one lost twice from this same pose, or one in
+        the direction of the destination basket, whose white plastic stands out from the mat like
+        an object: guess basket_base_range_deg [from, to] when set, else the marker's base angle
+        (last place, or basket_base_deg) plus or minus basket_keepout_deg."""
+        if self.arm is None:
+            return False
+        pose = self.arm.pose
+        if any(all(abs(pose[k] - p[k]) < SAME_POSE_DEG for k in p) and math.hypot(u - iu, v - iv) < SAME_SPOT
+               for p, iu, iv in self.ignored):
+            return True
+        # u across the image turns into a base angle the same way descend turns the base.
+        bearing = pose["base"] + self.base_deg_per_u * (u - 0.5)
+        span = self.guess_cfg.get("basket_base_range_deg")  # measured [from, to], wins when set
+        if span:
+            return span[0] <= bearing <= span[1]
+        basket = self.marker_base if self.marker_base is not None else self.guess_cfg.get("basket_base_deg")
+        return basket is not None and abs(bearing - basket) < self.guess_cfg.get("basket_keepout_deg", 25.0)
 
     def marker_quads(self, frame):
         """Corners of the destination marker, found more often than with find_marker's detector:
@@ -904,7 +969,9 @@ def approach(arm, look, vcfg, clock=time.monotonic, max_sweeps=None):
     """
     a, d = vcfg["approach"], vcfg["detection"]
     sightings = []
+    pending = []  # searching: sightings in a row at about the same spot, before aiming starts
     last_seen = None
+    arm.first_sighting = None  # (pose, u, v) where this approach first saw the object
     sweeps = aim_steps = 0
     while True:
         status = "aiming" if last_seen is not None else "searching"
@@ -914,6 +981,22 @@ def approach(arm, look, vcfg, clock=time.monotonic, max_sweeps=None):
         print(f"  {status:9s} {box:34s} tip ~{arm.tip_height(arm.pose):3.0f} mm "
               f"pose b{arm.pose['base']:+.0f} s{arm.pose['shoulder']:+.0f} e{arm.pose['elbow']:+.0f}")
         if det is not None and det[0] >= d["follow_confidence"]:
+            if last_seen is None and a.get("confirm_looks", 1) > 1:
+                # A flash of glare or a passing hand is gone on the next look: wait for
+                # confirm_looks sightings in a row at about the same spot before aiming.
+                same = pending and math.hypot(det[1] - pending[-1][1], det[2] - pending[-1][2]) < SAME_SPOT
+                if pending and not same:  # it jumped: nothing steady here, search on
+                    pending = []
+                    sweeps += search_step(arm, vcfg)
+                    if max_sweeps and sweeps >= max_sweeps:
+                        return False, "nothing found"
+                    continue
+                pending.append(det)
+                if len(pending) < a["confirm_looks"]:
+                    continue
+            if last_seen is None:
+                arm.first_sighting = ({k: arm.pose[k] for k in ("base", "shoulder", "elbow")}, det[1], det[2])
+            pending = []
             last_seen = now
             moved = aim_step(arm, det, vcfg, a.get("aim_min_tip_mm")) if a["aim_before_pick"] else False
             if moved is None:
@@ -937,6 +1020,7 @@ def approach(arm, look, vcfg, clock=time.monotonic, max_sweeps=None):
                                    f"{arm.reach(arm.pose):.0f} mm out): lower gripper_offset_mm")
                 return True, f"at grip height, tip ~{arm.tip_height(arm.pose):.0f} mm"
         elif last_seen is None:
+            pending = []
             sweeps += search_step(arm, vcfg)
             if max_sweeps and sweeps >= max_sweeps:
                 return False, "nothing found"
@@ -951,8 +1035,22 @@ def find_and_approach(arm, detector, vcfg, max_sweeps=None):
     arm.search_turn = 0
     detector.unknown_reported = False
     detector.confirmed, detector.track = False, None
+    detector.ignored = []
+    lost = []  # (pose, u, v) where each lost object was first seen
+    max_lost = vcfg["approach"].get("max_lost", 6)
     ok, reason = approach(arm, detector.look, vcfg, max_sweeps=max_sweeps)
     while reason == "object lost":
+        spot = arm.first_sighting
+        lost.append(spot)
+        if len(lost) >= max_lost:
+            return False, (f"lost the object {len(lost)} times while aiming; nothing solid to pick "
+                           f"(glare, a shadow or a hand?)")
+        if spot and detector.guess and sum(
+                all(abs(spot[0][k] - p[k]) < SAME_POSE_DEG for k in p) and math.hypot(spot[1] - u, spot[2] - v) < SAME_SPOT
+                for p, u, v in lost if p) >= 2:
+            # Seen from the same search pose and lost again: not a real object, look elsewhere.
+            print(f"  Lost u{spot[1]:.2f} v{spot[2]:.2f} twice from this pose: ignoring that spot and searching on.")
+            detector.ignored.append(spot)
         print("Object lost. Going back to the start pose to look again.")
         arm.ramp(arm.start)
         detector.confirmed, detector.track = False, None
@@ -1007,6 +1105,7 @@ def scan_for_marker(arm, detector, vcfg):
                 det = detector.look_marker("looking for marker")
                 if det:
                     return True
+            detector.save_miss(f"scan-b{base:+.0f}-r{row}")
     return False
 
 
@@ -1015,14 +1114,18 @@ def place_on_marker(arm, detector, vcfg, memory):
     p, a = vcfg["place"], vcfg["approach"]
     print(f"YOLO off. Looking for ArUco id {detector.marker_id} with OpenCV.")
     found = False
-    if memory.get("base") is not None:
-        # The marker does not move: look where it was last time before sweeping the whole table,
-        # which keeps the held object swinging for far less time.
-        print(f"  Going straight to where the marker was (base {memory['base']:+.0f} deg).")
-        arm.ramp({**arm.start, "base": memory["base"]})
+    # The marker does not move: look where it was last time (or where the config says the basket
+    # is, after a restart) before sweeping the whole table, which keeps the held object swinging
+    # for far less time.
+    first = memory.get("base", p.get("marker_base_deg"))
+    if first is not None:
+        print(f"  Going straight to where the marker {'was' if 'base' in memory else 'should be'} (base {first:+.0f} deg).")
+        arm.ramp({**arm.start, "base": first})
         if not arm.dry_run:
             time.sleep(vcfg["approach"]["search_settle_s"])
-        found = any(detector.look_marker("checking the marker's place") for _ in range(p["looks_per_stop"] + 1))
+        found = any(detector.look_marker("checking the marker's place") for _ in range(p["looks_per_stop"] + 3))
+        if not found:
+            detector.save_miss(f"place-b{first:+.0f}")
     if found or scan_for_marker(arm, detector, vcfg):
         for _ in range(a["max_aim_steps"]):
             det = detector.look_marker("aiming at marker")
@@ -1044,9 +1147,12 @@ def place_on_marker(arm, detector, vcfg, memory):
         print("Marker not seen; using the place it was last found.")
         arm.ramp({**arm.start, "base": memory["base"]})
     else:
-        print("Marker not found.")
+        print(f"Marker not found. The camera frames of the search are in {MARKER_MISSES}.")
         return False
-    move_tip(arm, p["drop_tip_mm"], memory["reach"])
+    # Out over the basket first at the carrying height, then straight down: a diagonal line
+    # swings the held object, which hangs below the jaws, into the basket's wall.
+    move_tip(arm, max(arm.tip_height(arm.pose), p["drop_tip_mm"]), memory["reach"])
+    move_tip(arm, p["drop_tip_mm"], arm.reach(arm.pose))
     print("Releasing.")
     arm.open_gripper()
     arm.relax_gripper()
@@ -1065,6 +1171,7 @@ def auto_run(arm, detector, vcfg, max_picks, wait_for_hand=True, memory=None):
     picks = 0
     memory = {} if memory is None else memory
     while not max_picks or picks < max_picks:
+        detector.marker_base = memory.get("base")  # the guess skips the basket's direction
         arm.open_gripper()
         ok, reason = find_and_approach(arm, detector, vcfg, max_sweeps=auto["max_sweeps"])
         if not ok:
