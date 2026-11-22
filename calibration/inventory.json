@@ -8,23 +8,23 @@
       "yolo_class": "relay_module",
       "color_only": false,
       "zone": "A1",
-      "stock": 9,
+      "stock": 8,
       "barcode": "ARM-0001",
       "aliases": [
         "รีเลย์",
         "รีเลย",
         "relay"
       ],
-      "picks": 10
+      "picks": 11
     },
     {
       "id": "ultrasonic",
       "name": "HC-SR04 ultrasonic sensor",
       "name_th": "เซนเซอร์อัลตราโซนิก",
       "yolo_class": "ultrasonic_hc-sr04",
-      "color_only": true,
+      "color_only": false,
       "zone": "A2",
-      "stock": 5,
+      "stock": 1,
       "barcode": "ARM-0002",
       "aliases": [
         "อัลตราโซนิก",
@@ -34,25 +34,26 @@
         "hc-sr04",
         "hc sr04"
       ],
-      "picks": 46
+      "picks": 50
     },
     {
-      "id": "bananapi",
-      "name": "Banana Pi (boxed)",
-      "name_th": "บานาน่าพาย",
-      "yolo_class": "bananapi",
+      "id": "triple_syringe",
+      "name": "Triple syringe",
+      "name_th": "ไซริงค์ 3 หัว",
+      "yolo_class": "triple_syringe",
       "color_only": false,
       "zone": "B1",
-      "stock": 5,
+      "stock": 2,
       "barcode": "ARM-0003",
       "aliases": [
-        "บานาน่า",
-        "บานาน่าพาย",
-        "banana pi",
-        "bananapi",
-        "banana"
+        "ไซริงค์",
+        "ไซริงก์",
+        "กระบอกฉีดยา",
+        "ฉีดยา",
+        "syringe",
+        "triple syringe"
       ],
-      "picks": 1
+      "picks": 3
     },
     {
       "id": "unknown",

@@ -16,7 +16,7 @@
     <li class={job.state}>
       <span class="chip">{label[job.state] ?? job.state}</span>
       <span class="name">{job.name_th}{job.count > 1 ? ` × ${job.count}` : ''}</span>
-      <small>{source[job.source] ?? job.source}{job.count > 1 && (job.state === 'running' || job.state === 'queued') ? ` · หยิบแล้ว ${job.done}/${job.count}` : ''}{job.message ? ` · ${job.message}` : ''}</small>
+      <small>{source[job.source] ?? job.source}{job.count > 1 && (job.state === 'running' || job.state === 'queued') ? ` · หยิบแล้ว ${job.done}/${job.count}` : ''}{job.message ? ` · ${job.message}` : ''}{job.inspection ? ' · ตรวจรับแล้ว' : ''}</small>
       {#if job.state === 'queued'}
         <button class="x" onclick={() => oncancel(job.id)} aria-label="ยกเลิก">✕</button>
       {/if}

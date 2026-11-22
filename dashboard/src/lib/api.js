@@ -17,3 +17,4 @@ export const getStatus = () => request('GET', '/api/status');
 export const queuePick = (order) => request('POST', '/api/queue', order);
 export const cancelJob = (id) => request('DELETE', `/api/queue/${id}`);
 export const stopRobot = () => request('POST', '/api/stop');
+export const getInspections = () => request('GET', '/api/inspections').then((d) => d.results);

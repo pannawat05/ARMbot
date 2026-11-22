@@ -19,7 +19,7 @@
   },
 
   "yolo": {
-    "weights": "models/best.pt",
+    "weights": "models/best-22-11.pt",
     "confidence": 0.35,
     "imgsz": 640,
     "pixel_point": "center"
@@ -95,7 +95,7 @@
     "jaw_open_mm": 53.0,
     "squeeze_mm": 3.0,
     "_note_safe": "safe_min_deg: the gripper is never commanded below this. Further closed, an SG90 pushing on a hard object stalls, draws high current and can burn out.",
-    "safe_min_deg": 50
+    "safe_min_deg": 44
   },
 
   "ddqn": {

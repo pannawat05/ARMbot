@@ -196,7 +196,7 @@ class Arm:
         m = vcfg["motion"]
         self.free_accel, self.carry_accel = m["accel_deg_per_s2"], m["carry_accel_deg_per_s2"]
         self.accel = self.free_accel
-        self.grip_deg = self.grip_angle(vcfg["grip"].get("width_mm"))
+        self.grip_deg = self.grip_angle(vcfg["grip"].get("width_mm"), vcfg["grip"].get("grip_deg"))
         # Optional two-speed close (grip slow_from_deg): quick down to that angle, which must be
         # wider than the object, then slowly through the contact so the first jaw to touch does
         # not flick a light object out of the gripper.
@@ -334,14 +334,14 @@ class Arm:
             if not self.dry_run:
                 time.sleep(TICK_S)
 
-    def grip_angle(self, width_mm=None):
+    def grip_angle(self, width_mm=None, grip_deg=None):
         """Gripper angle that closes the jaws squeeze_mm narrower than an object width_mm wide
         (jaws assumed to open evenly with the angle, from jaw_closed_deg = touching to open_deg
         = jaw_open_mm apart). Never below safe_min_deg, where the SG90 stalls and can burn
         out; without a width, the fixed grip_deg."""
         g = self.gripper
         if width_mm is None:
-            deg = g["grip_deg"]
+            deg = g["grip_deg"] if grip_deg is None else grip_deg  # grip_deg: this object's own angle
         else:
             frac = max(0.0, width_mm - g["squeeze_mm"]) / g["jaw_open_mm"]
             deg = g["jaw_closed_deg"] + frac * (g["open_deg"] - g["jaw_closed_deg"])
@@ -425,7 +425,7 @@ class Detector:
                 raise SystemExit(f"'{class_name}' is not a YOLO class. Known: {', '.join(self.model.names.values())}")
             trained = str((self.model.ckpt or {}).get("date", "unknown"))
             print(f"YOLO model trained {trained}.")
-            if moving and not self.verify_color:
+            if moving and not self.verify_color and not vcfg["detection"].get("yolo_only"):
                 raise SystemExit(f"Blocked --execute: '{class_name}' has no colour to confirm YOLO, and YOLO "
                                  "alone sees objects that are not there. Add --trust-yolo to run anyway.")
         self.cfg = vcfg["detection"]
@@ -516,7 +516,9 @@ class Detector:
         if best is None:
             return None, None
         palette = self.palette["classes"].get(self.class_name, {})
-        if palette.get("circles"):
+        if not self.cfg.get("ruler", True):
+            pass  # pure YOLO: the box and its own confidence only, nothing else may confirm or change it
+        elif palette.get("circles"):
             ruler, _ = self.find_circle_pair(frame, palette, best[1:3])
             if ruler is not None and len(ruler) > 4:
                 # YOLO's box and the circle pair agree on where the module is: full confidence.
@@ -878,9 +880,12 @@ def descend(arm, u, vcfg, v=None, view_mm=None):
     farthest = reach
     while farthest > 0 and not tip_path(arm, a["grip_tip_mm"], farthest, 5.0)[1]:
         farthest -= 3.0
+    arm.warning = None
     if farthest < reach - 2.0:
         print(f"  {reach:.0f} mm out is past the arm's limit at grip height; going down at {farthest:.0f} mm "
               f"instead. gripper_offset_mm is too big for this object (the jaws will land north of it).")
+        arm.warning = (f"object {reach:.0f} mm from the base but the arm reaches only {farthest:.0f} mm at the table: "
+                       f"the jaws land {reach - farthest:.0f} mm short, move it closer")
         reach = farthest
     try:
         move_tip(arm, a["grip_tip_mm"], reach)
@@ -1009,7 +1014,16 @@ def place_on_marker(arm, detector, vcfg, memory):
     """Carry the held object to the ArUco marker and release it. False if it stays in the gripper."""
     p, a = vcfg["place"], vcfg["approach"]
     print(f"YOLO off. Looking for ArUco id {detector.marker_id} with OpenCV.")
-    if scan_for_marker(arm, detector, vcfg):
+    found = False
+    if memory.get("base") is not None:
+        # The marker does not move: look where it was last time before sweeping the whole table,
+        # which keeps the held object swinging for far less time.
+        print(f"  Going straight to where the marker was (base {memory['base']:+.0f} deg).")
+        arm.ramp({**arm.start, "base": memory["base"]})
+        if not arm.dry_run:
+            time.sleep(vcfg["approach"]["search_settle_s"])
+        found = any(detector.look_marker("checking the marker's place") for _ in range(p["looks_per_stop"] + 1))
+    if found or scan_for_marker(arm, detector, vcfg):
         for _ in range(a["max_aim_steps"]):
             det = detector.look_marker("aiming at marker")
             if det is None:
@@ -1040,13 +1054,16 @@ def place_on_marker(arm, detector, vcfg, memory):
     return True
 
 
-def auto_run(arm, detector, vcfg, max_picks, wait_for_hand=True):
-    """Pick, carry to the marker and drop, until nothing is left or max_picks is reached."""
+def auto_run(arm, detector, vcfg, max_picks, wait_for_hand=True, memory=None):
+    """Pick, carry to the marker and drop, until nothing is left or max_picks is reached.
+
+    memory (base angle and reach where the marker was last aimed at) can be kept by the caller
+    between runs, so the next pick goes straight to the marker."""
     auto = vcfg["auto"]
     print("Automatic mode: pick, carry to the marker, drop, until nothing is left. Ctrl+C to stop.")
     arm.go_start()
     picks = 0
-    memory = {}
+    memory = {} if memory is None else memory
     while not max_picks or picks < max_picks:
         arm.open_gripper()
         ok, reason = find_and_approach(arm, detector, vcfg, max_sweeps=auto["max_sweeps"])

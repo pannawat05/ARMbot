@@ -14,8 +14,9 @@ Usage (run with the .venv-cpu interpreter, from python/):
 Open https://<pi address>:8443 . Phones need HTTPS for the microphone and camera, so a
 self-signed certificate is made on first start; accept the browser warning once.
 
-API: GET /api/items, GET /api/status, POST /api/queue {"item_id"|"barcode"|"text", "count"},
-DELETE /api/queue/<id>, POST /api/stop, GET /stream.mjpg, GET /mqtt.json.
+API: GET /api/items, GET /api/status, POST /api/queue {"item_id"|"barcode"|"text", "count", "job_id"},
+DELETE /api/queue/<id>, POST /api/stop, GET /stream.mjpg, GET /mqtt.json,
+GET /api/inspections (results from the receiving dashboard), GET /api/inspections/<event_id>.jpg.
 
 MQTT (calibration/mqtt.json, skipped with --no-mqtt), with <p> the prefix ("armbot"):
   published, retained:  <p>/online "1"/"0", <p>/items, <p>/status (same JSON as the API)
@@ -25,8 +26,15 @@ MQTT (calibration/mqtt.json, skipped with --no-mqtt), with <p> the prefix ("armb
                         sees an object that has no class; the clean image and a YOLO-format
                         label are saved in captures/unknown/ (newest MAX_CAPTURES kept),
                         <p>/camera JPEG 320x240 every camera_every_s (default 1 s; 0 = off)
-  subscribed:           <p>/cmd/queue {"item_id"|"barcode"|"text", "source"},
-                        <p>/cmd/cancel {"id"}, <p>/cmd/stop {}
+                        <p>/inspection/latest (retained) the newest inspection result, picture
+                        included, for the dashboards
+  subscribed:           <p>/cmd/queue {"item_id"|"barcode"|"text", "source", "count", "job_id"},
+                        <p>/cmd/cancel {"id"}, <p>/cmd/stop {},
+                        <p>/inspection/result (QoS 1; mqtt.json "result_topic" or the environment
+                        variable MQTT_RESULT_TOPIC to change it): the receiving dashboard's
+                        inspection result with its JPEG as base64, matched to a queued job by
+                        the job_id that came with the queue command; pictures go to
+                        captures/inspection/ (newest MAX_INSPECTIONS kept)
 
 Safety: anyone who can reach the port can move the arm. Stop (button or POST /api/stop)
 ends the current pick at the next camera look and sends the arm to the rest pose, the
@@ -34,6 +42,8 @@ same as Ctrl+C in visual_pick.py.
 """
 
 import argparse
+import base64
+import binascii
 import collections
 import copy
 import json
@@ -60,6 +70,9 @@ MQTT_CONFIG = ROOT / "calibration" / "mqtt.json"
 DIST = ROOT / "dashboard" / "dist"
 CAPTURES = ROOT / "captures" / "unknown"  # images and boxes of objects with no class
 MAX_CAPTURES = 200  # oldest are deleted beyond this; the SD card is nearly full
+INSPECTIONS = ROOT / "captures" / "inspection"  # pictures that came back with an inspection result
+MAX_INSPECTIONS = 20  # results (and pictures) kept
+MAX_RESULT_BYTES = 6_000_000  # a result message or its picture bigger than this is dropped
 CERT_DIR = ROOT / "python" / ".armbot_certs"
 STREAM_FPS = 8
 MAX_PICKS_PER_JOB = 20  # a queue command asking for more is cut to this
@@ -206,6 +219,75 @@ class Inventory:
             os.replace(tmp, self.path)
 
 
+class InspectionStore:
+    """Inspection results (counts and a picture) sent back by the receiving dashboard."""
+
+    def __init__(self, folder=INSPECTIONS, keep=MAX_INSPECTIONS):
+        self.folder, self.keep = folder, keep
+        self.lock = threading.Lock()
+        self.results = []  # newest last; each is the message without its picture, plus "image_file"
+        self.folder.mkdir(parents=True, exist_ok=True)
+        for old in sorted(self.folder.glob("*.json"), key=lambda f: f.stat().st_mtime)[-keep:]:
+            try:
+                self.results.append(json.loads(old.read_text("utf-8")))
+            except (OSError, ValueError):
+                pass
+
+    @staticmethod
+    def parse(raw):
+        """(result, jpeg) from one MQTT message, or (None, reason) when it is not a usable result."""
+        if len(raw) > MAX_RESULT_BYTES:
+            return None, "message too big"
+        try:
+            body = json.loads(raw)
+        except (ValueError, UnicodeError):
+            return None, "not JSON"
+        if not isinstance(body, dict) or body.get("type") != "inspection_result" or body.get("status") != "completed":
+            return None, "not a completed inspection_result"
+        event_id, job_id = body.get("event_id"), body.get("job_id")
+        if type(event_id) is not int or not isinstance(job_id, str) or not job_id or len(job_id) > 100:
+            return None, "event_id or job_id missing"
+        image = body.get("image")
+        if not isinstance(image, dict) or image.get("encoding") != "base64" or not isinstance(image.get("data"), str):
+            return None, "no base64 image"
+        try:
+            jpeg = base64.b64decode(image["data"], validate=True)
+        except (binascii.Error, ValueError):
+            return None, "image is not base64"
+        if not jpeg.startswith(b"\xff\xd8") or len(jpeg) > MAX_RESULT_BYTES:
+            return None, "image is not a JPEG or is too big"
+        counts = lambda v: {str(k): n for k, n in v.items() if type(n) is int} if isinstance(v, dict) else {}
+        result = {"event_id": event_id, "job_id": job_id, "armbot_job_id": body.get("armbot_job_id"),
+                  "status": "completed", "completed_at": str(body.get("completed_at") or ""),
+                  "requested": counts(body.get("requested")), "detected": counts(body.get("detected")),
+                  "received_at": time.time(), "image_file": f"{event_id}.jpg"}
+        return result, jpeg
+
+    def add(self, result, jpeg):
+        """Save a parsed result; False when this event_id was already stored (the sender retries)."""
+        with self.lock:
+            if any(r["event_id"] == result["event_id"] for r in self.results):
+                return False
+            (self.folder / f"{result['event_id']}.jpg").write_bytes(jpeg)
+            (self.folder / f"{result['event_id']}.json").write_text(json.dumps(result, ensure_ascii=False), "utf-8")
+            self.results.append(result)
+            for old in self.results[:-self.keep]:
+                for ext in ("jpg", "json"):
+                    (self.folder / f"{old['event_id']}.{ext}").unlink(missing_ok=True)
+            self.results = self.results[-self.keep:]
+        return True
+
+    def list(self):
+        with self.lock:
+            return list(reversed(self.results))
+
+    def image(self, event_id):
+        with self.lock:
+            known = any(r["event_id"] == event_id for r in self.results)
+        path = self.folder / f"{event_id}.jpg"
+        return path.read_bytes() if known and path.is_file() else None
+
+
 class Robot:
     """Queue plus the worker thread that runs one pick at a time."""
 
@@ -223,11 +305,13 @@ class Robot:
         hw = self.main_cfg["hardware"]
         self.pca = Pca9685(hw["i2c_bus"], int(hw["pca9685_address"], 0), keep_outputs=True) if execute else DryRunQuiet()
         self.on_unknown = None  # set by MqttBridge: callback(info, annotated_jpeg)
+        self.marker_memory = {}  # where the ArUco marker was last aimed at; kept between picks
         self.wake = threading.Event()
         threading.Thread(target=self._worker, daemon=True).start()
 
-    def add(self, item, source, count=1):
-        """Queue count picks of this item as one job; never more than the stock (at least 1)."""
+    def add(self, item, source, count=1, ref=None):
+        """Queue count picks of this item as one job; never more than the stock (at least 1).
+        ref is the sender's own job id (a string); inspection results come back under it."""
         try:
             count = int(count)
         except (TypeError, ValueError):
@@ -237,10 +321,22 @@ class Robot:
             job = {"id": self.next_id, "item_id": item["id"], "name": item["name"], "name_th": item["name_th"],
                    "source": source, "count": count, "done": 0, "state": "queued", "message": "",
                    "created": time.time()}
+            if ref:
+                job["ref"] = ref
             self.next_id += 1
             self.jobs.append(job)
         self.wake.set()
         return job
+
+    def inspected(self, result):
+        """Note an inspection result on the queued job it belongs to (same ref), if still listed."""
+        with self.lock:
+            for job in self.jobs:
+                if job.get("ref") == result["job_id"]:
+                    job["inspection"] = {"event_id": result["event_id"], "requested": result["requested"],
+                                         "detected": result["detected"]}
+                    return job["id"]
+        return None
 
     def cancel(self, job_id):
         with self.lock:
@@ -327,7 +423,7 @@ class Robot:
                                    self.execute, cam=self.hub, model=self.model)
             detector.on_unknown = lambda frame, best, box: self._unknown_seen(job, frame, best, box)
             arm = vp.Arm(self.pca, self.main_cfg, vcfg, dry_run=not self.execute)
-            picks = vp.auto_run(arm, detector, vcfg, max_picks=1, wait_for_hand=False)
+            picks = vp.auto_run(arm, detector, vcfg, max_picks=1, wait_for_hand=False, memory=self.marker_memory)
         except vp.StopRequested:
             print("Stopped from the dashboard. Going to the rest pose.")
             self._rest()
@@ -339,7 +435,8 @@ class Robot:
             print(f"Pick failed: {type(e).__name__}: {e}")
             return False, f"{type(e).__name__}: {e}"
         if picks == 1:
-            return True, "picked and placed"
+            warning = getattr(arm, "warning", None)  # e.g. the object was beyond the arm's reach
+            return True, "picked and placed" + (f" (warning: {warning})" if warning else "")
         return False, getattr(detector, "stop_reason", None) or "not found"
 
     def _unknown_seen(self, job, frame, best, box):
@@ -385,12 +482,19 @@ class Robot:
 class MqttBridge:
     """Mirrors the queue and status on an MQTT broker and takes commands from it."""
 
-    def __init__(self, cfg, robot, inventory, log, hub=None):
+    def __init__(self, cfg, robot, inventory, log, hub=None, inspections=None):
         import paho.mqtt.client as mqtt
 
         self.robot, self.inventory, self.log, self.hub = robot, inventory, log, hub
+        self.inspections = inspections
         self.camera_every_s = cfg.get("camera_every_s", 1.0)  # 0 = do not send snapshots
         self.p = cfg["prefix"]
+        self.result_topic = os.environ.get("MQTT_RESULT_TOPIC", "").strip() or cfg.get("result_topic") \
+            or f"{self.p}/inspection/result"
+        if self.result_topic.startswith(f"{self.p}/cmd/") or any(c in self.result_topic for c in "#+\0") \
+                or self.result_topic == f"{self.p}/inspection/latest":
+            print(f"MQTT result topic {self.result_topic!r} is not allowed; using the default.")
+            self.result_topic = f"{self.p}/inspection/result"
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"armbot-{os.uname().nodename}")
         if cfg.get("username"):  # public brokers such as broker.hivemq.com take no login
             self.client.username_pw_set(cfg["username"], cfg.get("password"))
@@ -418,11 +522,31 @@ class MqttBridge:
             print(f"MQTT connection refused: {reason}")
             return
         print(f"MQTT connected; topics {self.p}/#")
-        client.subscribe(f"{self.p}/cmd/#", qos=1)
+        client.subscribe([(f"{self.p}/cmd/#", 1), (self.result_topic, 1)])
         client.publish(f"{self.p}/online", "1", qos=1, retain=True)
         self._send("items", {"items": self.inventory.items()}, retain=True)
 
+    def _result(self, payload):
+        """An inspection result from the receiving dashboard: keep it, tell the job, pass it on."""
+        if self.inspections is None:
+            return
+        result, jpeg = self.inspections.parse(payload)
+        if result is None:
+            print(f"Inspection result ignored: {jpeg}.")
+            return
+        if not self.inspections.add(result, jpeg):
+            return  # the sender retries until the broker confirms; the first copy is enough
+        job = self.robot.inspected(result)
+        print(f"Inspection result for {result['job_id']} (event {result['event_id']}): "
+              f"asked {result['requested']}, found {result['detected']}"
+              + (f"; job {job}" if job else "; no queued job with that id") + ".")
+        self.client.publish(f"{self.p}/inspection/latest", json.dumps(
+            {**result, "image": {"content_type": "image/jpeg", "encoding": "base64",
+                                 "data": base64.b64encode(jpeg).decode()}}), qos=1, retain=True)
+
     def _message(self, _client, _userdata, msg):
+        if msg.topic == self.result_topic:
+            return self._result(msg.payload)
         try:
             body = json.loads(msg.payload or b"{}")
         except json.JSONDecodeError:
@@ -430,13 +554,12 @@ class MqttBridge:
         cmd = msg.topic.removeprefix(f"{self.p}/cmd/")
         if cmd == "queue":
             item = self.inventory.find(item_id=body.get("item_id"), barcode=body.get("barcode"), text=body.get("text"))
+            ref = body.get("job_id") if isinstance(body.get("job_id"), str) and len(body["job_id"]) <= 100 else None
             if item is None:
-                self._send("event", {"type": "unknown", "query": body})
+                self._send("event", {"type": "unknown", "query": body, **({"job_id": ref} if ref else {})})
             else:
-                self._send("event", {"type": "queued",
-                                     "job": self.robot.add(item, body.get("source", "mqtt"),
-                                                           body.get("count", body.get("quantity", 1))),
-                                     "item": item})
+                job = self.robot.add(item, body.get("source", "mqtt"), body.get("count", body.get("quantity", 1)), ref)
+                self._send("event", {"type": "queued", "job": job, "item": item, **({"job_id": ref} if ref else {})})
         elif cmd == "cancel":
             self.robot.cancel(int(body.get("id", 0)))
         elif cmd == "stop":
@@ -481,7 +604,7 @@ class QuietServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def make_handler(robot, inventory, hub, log, mqtt_cfg=None):
+def make_handler(robot, inventory, hub, log, mqtt_cfg=None, inspections=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -512,6 +635,18 @@ def make_handler(robot, inventory, hub, log, mqtt_cfg=None):
                 return self._json({**robot.status(), "log": log.tail()})
             if path == "/stream.mjpg":
                 return self._stream()
+            if path == "/api/inspections":
+                return self._json({"results": inspections.list() if inspections else []})
+            if path.startswith("/api/inspections/") and path.endswith(".jpg") and path[17:-4].isdigit():
+                jpeg = inspections.image(int(path[17:-4])) if inspections else None
+                if jpeg is None:
+                    return self._json({"error": "not found"}, 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(jpeg)))
+                self.send_header("Cache-Control", "max-age=3600")
+                self.end_headers()
+                return self.wfile.write(jpeg)
             if path == "/mqtt.json":
                 if not mqtt_cfg:
                     return self._json({"error": "MQTT off"}, 404)
@@ -526,8 +661,9 @@ def make_handler(robot, inventory, hub, log, mqtt_cfg=None):
                                       text=body.get("text"))
                 if item is None:
                     return self._json({"error": "unknown item", "query": body}, 404)
+                ref = body.get("job_id") if isinstance(body.get("job_id"), str) and len(body["job_id"]) <= 100 else None
                 return self._json({"job": robot.add(item, body.get("source", "click"),
-                                                    body.get("count", body.get("quantity", 1))), "item": item})
+                                                    body.get("count", body.get("quantity", 1)), ref), "item": item})
             if path == "/api/stop":
                 return self._json({"stopping": robot.stop()})
             self._json({"error": "not found"}, 404)
@@ -605,8 +741,9 @@ def main():
     hub = CameraHub(camera_cfg, turn=vp.image_turn(vp.load_config(vp.VISUAL_CONFIG)["directions"]))
     robot = Robot(args.execute, inventory, hub)
     mqtt_cfg = None if args.no_mqtt or not MQTT_CONFIG.exists() else json.loads(MQTT_CONFIG.read_text("utf-8"))
-    bridge = MqttBridge(mqtt_cfg, robot, inventory, log, hub) if mqtt_cfg else None
-    server = QuietServer(("0.0.0.0", args.port), make_handler(robot, inventory, hub, log, mqtt_cfg))
+    inspections = InspectionStore()
+    bridge = MqttBridge(mqtt_cfg, robot, inventory, log, hub, inspections) if mqtt_cfg else None
+    server = QuietServer(("0.0.0.0", args.port), make_handler(robot, inventory, hub, log, mqtt_cfg, inspections))
     scheme = "http"
     if not args.http:
         cert, key = ensure_certificate()

@@ -207,7 +207,107 @@
   },
   "_note_objects": "objects: per-class values laid over approach / limits / place, for objects that are not relay-sized. Heights are real table heights of the gripper tip. bananapi is a 95 mm tall box: search and aim stay above it, the jaws move out over it at align_tip_mm, then grip 25 mm below its top.",
   "objects": {
-    "bananapi": {
+    "ultrasonic_hc-sr04": {
+      "_note": "HC-SR04: found by its two circles (colour only), not by YOLO.",
+      "approach": {
+        "base_offset_deg": 3.28,
+        "_old_base_offset_deg": 7.2,
+        "_note_offset": "gripper_offset_mm 65, slope 0 (2026-11-13, from the video camfail.mp4): aimed from tip 160 mm with offset 17 (the multi-height teach fitted slope -1.19, wrong) the jaws closed about 50 mm short of the sensor, so about 65 is needed; this also fits 60 -> ~5 mm off, 40 -> ~25 mm short.",
+        "gripper_offset_mm": 125.0,
+        "target_u_frac": 0.5,
+        "target_v_frac": 0.5,
+        "gripper_offset_slope": 0.0,
+        "offset_ref_tip_mm": 130.0,
+        "_old_teach_2026_11_13": {
+          "gripper_offset_mm": 52.5,
+          "gripper_offset_slope": -1.188,
+          "base_offset_deg": 4.28
+        },
+        "grip_tip_mm": 30.0,
+        "_note_grip_tip": "grip_tip_mm 30 (was 38 shared): on 2026-11-13 the jaws stopped about 10 mm above the table at 38. Lower it 2-3 mm at a time if still too high; the jaws touch the table when it is too low.",
+        "aim_before_pick": true,
+        "commit_detections": 3,
+        "_note_first_detection": "2026-11-13: aim_before_pick false and commit_detections 1 = the pick starts on the first detection and trusts it (no aiming steps, no repeat sightings). Set aim_before_pick true and commit_detections 3 for the careful version."
+      },
+      "_note_offset": "base_offset_deg: jaws landed about 13 mm left (on the left transducer instead of between the two) on 2026-11-10, so 0.1 + 4.0 deg (13 mm at the 187 mm grip reach).",
+      "grip": {
+        "width_mm": 8.0,
+        "_note_width": "width_mm 8 closes to the safe minimum, 50 deg (was 12 -> 55, before that 15 -> 61): the firmest the config allows. The 20 mm board stops the jaws near 72 deg, so the servo pushes against about 22 degrees of error. Never below gripper safe_min_deg (50) in pick_place_config.json: an SG90 pushing harder than that stalls and can burn out. 2026-11-13.",
+        "_old_width_mm": 15.0,
+        "slow_from_deg": 95.0,
+        "slow_deg_per_s": 40.0,
+        "_note_slow": "slow_from_deg 95: close quickly to 95 deg (a 28 mm gap, wider than the 20 mm board), then at slow_deg_per_s through the contact down to the grip angle. 2026-11-13: the module bounced out of the gripper when the jaws closed fast onto it.",
+        "_old_width_mm_2": 12.0
+      },
+      "limits": {
+        "min_tip_height_mm": 24.0
+      },
+      "detection": {
+        "position_source": "yolo",
+        "yolo_only": true,
+        "ruler": false,
+        "max_box_area_frac": 1.0,
+        "follow_confidence": 0.4
+      },
+      "_note_detection": "2026-11-13: back to the circle pair for the HC-SR04 (inventory color_only true): the circle finder gives the position and mm ruler, conf 1.00 whenever it sees the module, so follow_confidence 0.7 is always met. The YOLO-box-centre settings it had are kept in _old_yolo_detection_2026_11_13 (YOLO saw the module in 7 of 16 ESP32-CAM frames, centre up to 13 mm off).",
+      "_old_yolo_detection_2026_11_13": {
+        "position_source": "yolo",
+        "yolo_only": true,
+        "max_box_area_frac": 1.0,
+        "follow_confidence": 0.5
+      },
+      "_old_detection_before_pure_yolo": {
+        "follow_confidence": 0.7
+      },
+      "_note_conf": "Pure YOLO (2026-11-22, models/best-22-11.pt): position = centre of YOLO's best box, own confidence only, no colour or ruler (yolo_only, ruler false). follow_confidence from confusion_matrix_normalized.png: of the false positives on background, 8% were relay_module, 33% ultrasonic_hc-sr04 and 59% triple_syringe; recall was 1.00, 0.87 and 1.00, and 13% of true HC-SR04 were called triple_syringe. So the class that makes the most false positives needs the highest threshold, and the one that misses a few (HC-SR04) must not be set too high.",
+      "_note_conf_measured": "2026-11-22 measured on 180 ESP32-CAM frames from real picks (best-22-11.pt): clear HC-SR04 gave conf 0.48 (the old threshold 0.55 never fired), clear relay 0.46-0.65, and a blurred relay close-up was called HC-SR04 at 0.33; so both thresholds sit at 0.40. triple_syringe stays at 0.70: a syringe in its bag scored about 0.57 while a ceiling light scored 0.89 and a plastic cup up to 0.74, so no single threshold separates them; the model needs training images with the bag and with such background objects."
+    },
+    "relay_module": {
+      "approach": {
+        "_old_base_offset_deg": 4.7,
+        "aim_before_pick": true,
+        "commit_detections": 3,
+        "_note_aim": "2026-11-22: aim first, then go down (aim_before_pick true, 3 sightings) and the camera-to-jaw offsets follow the HC-SR04's (offsets_from). Pure YOLO has no size ruler, so a pick on the first sighting used rough pixel-to-mm constants: the relay was seen near the bottom of the image (v 0.8-0.9) and landed about 2 inches off.",
+        "_old_base_offset_deg_own": 0.0
+      },
+      "grip": {
+        "_note_width": "No width_mm yet: the jaws open only 53 mm, so the board's 55 mm side cannot be what they hold. Measure the part between the jaws and set width_mm; until then grip_deg (50) is used.",
+        "slow_from_deg": 125.0,
+        "slow_deg_per_s": 40.0,
+        "grip_deg": 44.0,
+        "carry_deg_per_s": 12.0
+      },
+      "detection": {
+        "position_source": "yolo",
+        "yolo_only": true,
+        "ruler": false,
+        "max_box_area_frac": 1.0,
+        "follow_confidence": 0.4
+      },
+      "_note": "2026-11-13, same as the HC-SR04: pick at the centre of YOLO's best box at any size, no colour check (detection yolo_only); the pick starts on the first detection with conf 0.8 or more (commit_detections 1, aim_before_pick false); two-speed gripper close (grip slow_from_deg: quick down to 125 deg, then slow_deg_per_s through the contact). The relay has no size ruler, so the landing uses the fixed base_deg_per_u and mm_per_image_height estimates, which are least accurate for an off-centre first sighting; slow_from_deg 125 is a guess for the relay's width: raise it if the jaws touch the board before the slow part. follow_confidence 1.0 (2026-11-13): conf is 1.00 when YOLO's box has a blob of the relay's blue at its centre, otherwise YOLO's own confidence, so only a colour-backed detection starts a pick.",
+      "_note_conf": "Pure YOLO (2026-11-22, models/best-22-11.pt): position = centre of YOLO's best box, own confidence only, no colour or ruler (yolo_only, ruler false). follow_confidence from confusion_matrix_normalized.png: of the false positives on background, 8% were relay_module, 33% ultrasonic_hc-sr04 and 59% triple_syringe; recall was 1.00, 0.87 and 1.00, and 13% of true HC-SR04 were called triple_syringe. So the class that makes the most false positives needs the highest threshold, and the one that misses a few (HC-SR04) must not be set too high.",
+      "offsets_from": "ultrasonic_hc-sr04",
+      "motion": {
+        "carry_accel_deg_per_s2": 40.0
+      },
+      "_note_harder": "2026-11-22: harder grip: closes to 44 deg (gripper safe_min_deg lowered from 50 to 44 in pick_place_config.json) and carries gently (12 deg/s, accel 40) so the load stays in the jaws. An SG90's push saturates, so the gain from the angle may be small; if the servo gets hot after a pick, raise safe_min_deg again.",
+      "_note_conf_measured": "2026-11-22 measured on 180 ESP32-CAM frames from real picks (best-22-11.pt): clear HC-SR04 gave conf 0.48 (the old threshold 0.55 never fired), clear relay 0.46-0.65, and a blurred relay close-up was called HC-SR04 at 0.33; so both thresholds sit at 0.40. triple_syringe stays at 0.70: a syringe in its bag scored about 0.57 while a ceiling light scored 0.89 and a plastic cup up to 0.74, so no single threshold separates them; the model needs training images with the bag and with such background objects."
+    },
+    "unknown": {
+      "approach": {
+        "aim_before_pick": false,
+        "commit_detections": 1,
+        "grip_tip_mm": 30.0
+      },
+      "_note": "2026-11-13: the guess pick starts on the first detection and trusts it (no aiming steps, one sighting), like the HC-SR04 and relay. Guess objects have no size ruler, so the landing uses the fixed base_deg_per_u and mm_per_image_height estimates, and the 'part of the arm' check (which needs the base to turn between looks) never runs.",
+      "limits": {
+        "min_tip_height_mm": 24.0
+      },
+      "_note_grip_tip": "grip_tip_mm 30 and min_tip_height_mm 24 (same as the HC-SR04): at the shared 38 the jaws stop about 10 mm above the table, which misses anything low. 2026-11-13.",
+      "offsets_from": "ultrasonic_hc-sr04",
+      "_note_offsets": "offsets_from: the guess takes gripper_offset_mm, base_offset_deg, slope and reference height from the HC-SR04's approach, so tuning the HC-SR04 tunes the guess too (2026-11-14: the guess was still on the shared 60 mm / 0 deg while the HC-SR04 had been tuned). Remove offsets_from to give it its own."
+    },
+    "_old_bananapi_settings_2026_11_22": {
       "_note": "Box 95 mm tall. Gripper opening must fit across the box.",
       "approach": {
         "aim_min_tip_mm": 115.0,
@@ -229,85 +329,36 @@
         "lift_mm": 80.0
       }
     },
-    "ultrasonic_hc-sr04": {
-      "_note": "HC-SR04: found by its two circles (colour only), not by YOLO.",
-      "approach": {
-        "base_offset_deg": 3.28,
-        "_old_base_offset_deg": 7.2,
-        "_note_offset": "gripper_offset_mm 65, slope 0 (2026-11-13, from the video camfail.mp4): aimed from tip 160 mm with offset 17 (the multi-height teach fitted slope -1.19, wrong) the jaws closed about 50 mm short of the sensor, so about 65 is needed; this also fits 60 -> ~5 mm off, 40 -> ~25 mm short.",
-        "gripper_offset_mm": 125.0,
-        "target_u_frac": 0.5,
-        "target_v_frac": 0.5,
-        "gripper_offset_slope": 0.0,
-        "offset_ref_tip_mm": 130.0,
-        "_old_teach_2026_11_13": {
-          "gripper_offset_mm": 52.5,
-          "gripper_offset_slope": -1.188,
-          "base_offset_deg": 4.28
-        },
-        "grip_tip_mm": 30.0,
-        "_note_grip_tip": "grip_tip_mm 30 (was 38 shared): on 2026-11-13 the jaws stopped about 10 mm above the table at 38. Lower it 2-3 mm at a time if still too high; the jaws touch the table when it is too low.",
-        "aim_before_pick": false,
-        "commit_detections": 1,
-        "_note_first_detection": "2026-11-13: aim_before_pick false and commit_detections 1 = the pick starts on the first detection and trusts it (no aiming steps, no repeat sightings). Set aim_before_pick true and commit_detections 3 for the careful version."
-      },
-      "_note_offset": "base_offset_deg: jaws landed about 13 mm left (on the left transducer instead of between the two) on 2026-11-10, so 0.1 + 4.0 deg (13 mm at the 187 mm grip reach).",
-      "grip": {
-        "width_mm": 8.0,
-        "_note_width": "width_mm 8 closes to the safe minimum, 50 deg (was 12 -> 55, before that 15 -> 61): the firmest the config allows. The 20 mm board stops the jaws near 72 deg, so the servo pushes against about 22 degrees of error. Never below gripper safe_min_deg (50) in pick_place_config.json: an SG90 pushing harder than that stalls and can burn out. 2026-11-13.",
-        "_old_width_mm": 15.0,
-        "slow_from_deg": 95.0,
-        "slow_deg_per_s": 40.0,
-        "_note_slow": "slow_from_deg 95: close quickly to 95 deg (a 28 mm gap, wider than the 20 mm board), then at slow_deg_per_s through the contact down to the grip angle. 2026-11-13: the module bounced out of the gripper when the jaws closed fast onto it.",
-        "_old_width_mm_2": 12.0
-      },
-      "limits": {
-        "min_tip_height_mm": 24.0
-      },
+    "triple_syringe": {
+      "_note": "Pure YOLO (2026-11-22, models/best-22-11.pt): position = centre of YOLO's best box, own confidence only, no colour or ruler (yolo_only, ruler false). follow_confidence from confusion_matrix_normalized.png: of the false positives on background, 8% were relay_module, 33% ultrasonic_hc-sr04 and 59% triple_syringe; recall was 1.00, 0.87 and 1.00, and 13% of true HC-SR04 were called triple_syringe. So the class that makes the most false positives needs the highest threshold, and the one that misses a few (HC-SR04) must not be set too high. The old bananapi settings (grip height 70, align 125, aim and place heights) are in _old_bananapi_settings_2026_11_22 and were not carried over: tune the heights for the syringe.",
+      "offsets_from": "ultrasonic_hc-sr04",
       "detection": {
+        "position_source": "yolo",
+        "yolo_only": true,
+        "ruler": false,
+        "max_box_area_frac": 1.0,
         "follow_confidence": 0.7
       },
-      "_note_detection": "2026-11-13: back to the circle pair for the HC-SR04 (inventory color_only true): the circle finder gives the position and mm ruler, conf 1.00 whenever it sees the module, so follow_confidence 0.7 is always met. The YOLO-box-centre settings it had are kept in _old_yolo_detection_2026_11_13 (YOLO saw the module in 7 of 16 ESP32-CAM frames, centre up to 13 mm off).",
-      "_old_yolo_detection_2026_11_13": {
-        "position_source": "yolo",
-        "yolo_only": true,
-        "max_box_area_frac": 1.0,
-        "follow_confidence": 0.5
-      }
-    },
-    "relay_module": {
       "approach": {
-        "base_offset_deg": 0.0,
-        "_old_base_offset_deg": 4.7,
-        "aim_before_pick": false,
-        "commit_detections": 1
-      },
-      "grip": {
-        "_note_width": "No width_mm yet: the jaws open only 53 mm, so the board's 55 mm side cannot be what they hold. Measure the part between the jaws and set width_mm; until then grip_deg (50) is used.",
-        "slow_from_deg": 125.0,
-        "slow_deg_per_s": 40.0
-      },
-      "detection": {
-        "position_source": "yolo",
-        "yolo_only": true,
-        "max_box_area_frac": 1.0,
-        "follow_confidence": 1.0
-      },
-      "_note": "2026-11-13, same as the HC-SR04: pick at the centre of YOLO's best box at any size, no colour check (detection yolo_only); the pick starts on the first detection with conf 0.8 or more (commit_detections 1, aim_before_pick false); two-speed gripper close (grip slow_from_deg: quick down to 125 deg, then slow_deg_per_s through the contact). The relay has no size ruler, so the landing uses the fixed base_deg_per_u and mm_per_image_height estimates, which are least accurate for an off-centre first sighting; slow_from_deg 125 is a guess for the relay's width: raise it if the jaws touch the board before the slow part. follow_confidence 1.0 (2026-11-13): conf is 1.00 when YOLO's box has a blob of the relay's blue at its centre, otherwise YOLO's own confidence, so only a colour-backed detection starts a pick."
-    },
-    "unknown": {
-      "approach": {
-        "aim_before_pick": false,
-        "commit_detections": 1,
+        "aim_before_pick": true,
+        "commit_detections": 3,
         "grip_tip_mm": 30.0
       },
-      "_note": "2026-11-13: the guess pick starts on the first detection and trusts it (no aiming steps, one sighting), like the HC-SR04 and relay. Guess objects have no size ruler, so the landing uses the fixed base_deg_per_u and mm_per_image_height estimates, and the 'part of the arm' check (which needs the base to turn between looks) never runs.",
       "limits": {
         "min_tip_height_mm": 24.0
       },
-      "_note_grip_tip": "grip_tip_mm 30 and min_tip_height_mm 24 (same as the HC-SR04): at the shared 38 the jaws stop about 10 mm above the table, which misses anything low. 2026-11-13.",
-      "offsets_from": "ultrasonic_hc-sr04",
-      "_note_offsets": "offsets_from: the guess takes gripper_offset_mm, base_offset_deg, slope and reference height from the HC-SR04's approach, so tuning the HC-SR04 tunes the guess too (2026-11-14: the guess was still on the shared 60 mm / 0 deg while the HC-SR04 had been tuned). Remove offsets_from to give it its own."
+      "grip": {
+        "slow_from_deg": 135.0,
+        "slow_deg_per_s": 40.0,
+        "grip_deg": 44.0,
+        "carry_deg_per_s": 12.0
+      },
+      "_note_grip": "2026-11-22: aim first like the relay; grip at tip 30 (min 24), as the HC-SR04: at the shared 38 the jaws stop about 10 mm above the table, where a round barrel slides out when squeezed; two-speed close from 135 deg (a wide object is touched early, so the quick part stops well before it). The gripper already closes to its safe minimum (safe_min_deg 50): a firmer squeeze is a servo or pad matter, not a setting.",
+      "motion": {
+        "carry_accel_deg_per_s2": 40.0
+      },
+      "_note_harder": "2026-11-22: harder grip: closes to 44 deg (gripper safe_min_deg lowered from 50 to 44 in pick_place_config.json) and carries gently (12 deg/s, accel 40) so the load stays in the jaws. An SG90's push saturates, so the gain from the angle may be small; if the servo gets hot after a pick, raise safe_min_deg again.",
+      "_note_conf_measured": "2026-11-22 measured on 180 ESP32-CAM frames from real picks (best-22-11.pt): clear HC-SR04 gave conf 0.48 (the old threshold 0.55 never fired), clear relay 0.46-0.65, and a blurred relay close-up was called HC-SR04 at 0.33; so both thresholds sit at 0.40. triple_syringe stays at 0.70: a syringe in its bag scored about 0.57 while a ceiling light scored 0.89 and a plastic cup up to 0.74, so no single threshold separates them; the model needs training images with the bag and with such background objects."
     }
   },
   "guess": {

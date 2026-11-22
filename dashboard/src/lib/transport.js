@@ -9,32 +9,34 @@
 // Cloud mode: when the page is served from somewhere other than the Pi (the nginx image in
 // Dockerfile.cloud), /config.json carries the broker settings. The page then uses MQTT only,
 // keeps retrying, and shows the camera from the Pi's <prefix>/camera snapshots.
-// Both give the same interface: status and item updates, plus queue / cancel / stop.
+// Both give the same interface: status, item and inspection-result updates, plus queue / cancel / stop.
+// Inspection results (counts and a picture from the receiving dashboard) come from the Pi's
+// retained <prefix>/inspection/latest, or from /api/inspections over HTTP.
 
 import * as api from './api.js';
 
 const getJson = (url) => fetch(url).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 
-export async function connect({ onStatus, onItems, onOnline, onCamera }) {
+export async function connect({ onStatus, onItems, onOnline, onCamera, onInspections }) {
   const cloud = await getJson('/config.json');
   if (cloud?.mqtt) {
-    const link = await connectMqtt(cloud.mqtt, { onStatus, onItems, onOnline, onCamera }, false);
+    const link = await connectMqtt(cloud.mqtt, { onStatus, onItems, onOnline, onCamera, onInspections }, false);
     return { ...link, mode: 'MQTT cloud', cloud: true };
   }
   const cfg = await getJson('/mqtt.json');
   if (cfg?.ws_url && (location.protocol === 'http:' || !cfg.ws_url.startsWith('ws:'))) {
     try {
-      return await connectMqtt(cfg, { onStatus, onItems, onOnline });
+      return await connectMqtt(cfg, { onStatus, onItems, onOnline, onInspections });
     } catch (e) {
       console.warn(`MQTT ${cfg.ws_url} unreachable (${e.message}); using the Pi's HTTP API`);
     }
   }
-  return connectHttp({ onStatus, onItems, onOnline });
+  return connectHttp({ onStatus, onItems, onOnline, onInspections });
 }
 
 const MQTT_CONNECT_MS = 5000;
 
-async function connectMqtt(cfg, { onStatus, onItems, onOnline, onCamera }, mustConnect = true) {
+async function connectMqtt(cfg, { onStatus, onItems, onOnline, onCamera, onInspections }, mustConnect = true) {
   const mod = await import('mqtt');
   const connect = mod.connect ?? mod.default.connect;
   const p = cfg.prefix;
@@ -49,7 +51,8 @@ async function connectMqtt(cfg, { onStatus, onItems, onOnline, onCamera }, mustC
     reconnectPeriod: 2000,
     connectTimeout: MQTT_CONNECT_MS,
   });
-  const topics = [`${p}/status`, `${p}/items`, `${p}/online`, ...(onCamera ? [`${p}/camera`] : [])];
+  const topics = [`${p}/status`, `${p}/items`, `${p}/online`, `${p}/inspection/latest`, ...(onCamera ? [`${p}/camera`] : [])];
+  const results = new Map(); // event_id -> result, newest 20 kept
   const subscribe = () => client.subscribe(topics);
   if (mustConnect) {
     await new Promise((resolve, reject) => {
@@ -73,6 +76,13 @@ async function connectMqtt(cfg, { onStatus, onItems, onOnline, onCamera }, mustC
     const body = JSON.parse(text);
     if (topic === `${p}/status`) onStatus(body);
     if (topic === `${p}/items`) onItems(body.items);
+    if (topic === `${p}/inspection/latest` && body.image?.data) {
+      results.set(body.event_id, { ...body, image: `data:image/jpeg;base64,${body.image.data}` });
+      const newest = [...results.values()].sort((a, b) => b.received_at - a.received_at).slice(0, 20);
+      results.clear();
+      newest.forEach((r) => results.set(r.event_id, r));
+      onInspections?.(newest);
+    }
   });
   const send = (cmd, body) =>
     new Promise((resolve, reject) =>
@@ -87,13 +97,16 @@ async function connectMqtt(cfg, { onStatus, onItems, onOnline, onCamera }, mustC
   };
 }
 
-function connectHttp({ onStatus, onItems, onOnline }) {
+function connectHttp({ onStatus, onItems, onOnline, onInspections }) {
   const status = () =>
     api.getStatus().then((s) => (onStatus(s), onOnline(true))).catch(() => onOnline(false));
   const items = () => api.getItems().then(onItems).catch(() => {});
+  const inspections = () =>
+    api.getInspections().then((list) => onInspections?.(list.map((r) => ({ ...r, image: `/api/inspections/${r.event_id}.jpg` })))).catch(() => {});
   status();
   items();
-  const timers = [setInterval(status, 1000), setInterval(items, 5000)];
+  inspections();
+  const timers = [setInterval(status, 1000), setInterval(items, 5000), setInterval(inspections, 3000)];
   return {
     mode: 'HTTP',
     queue: (order) => api.queuePick(order).then(status),

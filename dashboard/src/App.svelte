@@ -8,6 +8,7 @@
   import ItemCards from './components/ItemCards.svelte';
   import ItemTable from './components/ItemTable.svelte';
   import QueuePanel from './components/QueuePanel.svelte';
+  import InspectionPanel from './components/InspectionPanel.svelte';
   import BarcodeScanner from './components/BarcodeScanner.svelte';
 
   let items = $state([]);
@@ -15,6 +16,7 @@
   let offline = $state(false);
   let link = $state(null); // MQTT or HTTP connection to the robot
   let camera = $state(null); // cloud mode: latest snapshot from the Pi
+  let inspections = $state([]); // results and pictures from the receiving dashboard, newest first
   let toast = $state('');
   let scanning = $state(false);
   let scanOnly = $state(false);
@@ -113,6 +115,7 @@
       onItems: (list) => (items = list),
       onOnline: (up) => (offline = !up),
       onCamera: (url) => (camera = url),
+      onInspections: (list) => (inspections = list),
     });
   });
   onDestroy(() => {
@@ -147,6 +150,7 @@
       {/if}
       <ItemCards {items} onpick={pick} />
       <QueuePanel {status} oncancel={(id) => link?.cancel(id)} onstop={() => link?.stop()} />
+      <InspectionPanel results={inspections} />
     </section>
   </main>
 {:else}
@@ -162,6 +166,7 @@
       <CameraView {status} snapshot={camera} cloud={link?.cloud} />
       <VoiceBar {voice} />
       <QueuePanel {status} log oncancel={(id) => link?.cancel(id)} onstop={() => link?.stop()} />
+      <InspectionPanel results={inspections} />
     </aside>
     <section class="items">
       <button class="scan-test" onclick={() => startScan(true)}>ทดลองสแกนบาร์โค้ด (ไม่สั่งแขนกล)</button>
